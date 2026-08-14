@@ -5,12 +5,12 @@ plugins {
 
 android {
     namespace = "org.ord.client"
-    compileSdk = 36
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "org.ord.client"
         minSdk = 29
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
 
