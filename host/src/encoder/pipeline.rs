@@ -119,10 +119,7 @@ impl VideoPipeline {
 
     fn build_pipeline_string(pipewire_node_id: u32, config: &EncoderConfig) -> Result<String> {
         let source_str = if pipewire_node_id > 0 {
-            format!(
-                "pipewiresrc path={} do-timestamp=true ! video/x-raw,width={},height={},framerate={}/1",
-                pipewire_node_id, config.width, config.height, config.fps
-            )
+            format!("pipewiresrc target-object={} do-timestamp=true", pipewire_node_id)
         } else {
             format!(
                 "videotestsrc is-live=true pattern=smpte ! video/x-raw,width={},height={},framerate={}/1",
@@ -142,16 +139,16 @@ impl VideoPipeline {
 
         let encoder_str = if use_vaapi && ElementFactory::find("vah264enc").is_some() {
             info!("Using VA-API Hardware H.264 Encoder (vah264enc)");
-            format!("videoconvert ! vah264enc bitrate={}", config.bitrate_kbps)
+            format!("videoconvert ! videoscale ! vah264enc bitrate={}", config.bitrate_kbps)
         } else if ElementFactory::find("x264enc").is_some() {
             info!("Using Software x264 Encoder (x264enc) with zerolatency tune");
             format!(
-                "videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast bitrate={} key-int-max={}",
+                "videoconvert ! videoscale ! x264enc tune=zerolatency speed-preset=ultrafast bitrate={} key-int-max={}",
                 config.bitrate_kbps, config.keyframe_interval_frames
             )
         } else if ElementFactory::find("openh264enc").is_some() {
             info!("Using OpenH264 Encoder (openh264enc)");
-            format!("videoconvert ! openh264enc bitrate={}", config.bitrate_kbps * 1000)
+            format!("videoconvert ! videoscale ! openh264enc bitrate={}", config.bitrate_kbps * 1000)
         } else {
             return Err(anyhow!("No compatible H.264 encoder found on system"));
         };
