@@ -66,8 +66,11 @@ impl DisplayBackend for MutterDisplayBackend {
         virtual_props.insert("is-recording-indicator", Value::from(false));
         virtual_props.insert("cursor-mode", Value::from(1u32));
 
-        let mode_tuple = (width as i32, height as i32, fps as f64);
-        virtual_props.insert("modes", Value::from(vec![mode_tuple]));
+        let mut mode_dict: HashMap<&str, Value> = HashMap::new();
+        mode_dict.insert("size", Value::from((width as u32, height as u32)));
+        mode_dict.insert("refresh-rate", Value::from(fps as f64));
+        mode_dict.insert("is-preferred", Value::from(true));
+        virtual_props.insert("modes", Value::from(vec![mode_dict]));
 
         let stream_path: OwnedObjectPath = session_proxy
             .call("RecordVirtual", &(virtual_props,))
