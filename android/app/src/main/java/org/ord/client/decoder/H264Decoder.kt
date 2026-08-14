@@ -25,24 +25,48 @@ class H264Decoder(
 
         try {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-            }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                format.setInteger(MediaFormat.KEY_PRIORITY, 0)
+            
+            var mediaCodec: MediaCodec? = null
+            try {
+                val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                c.configure(format, surface, null, 0)
+                c.start()
+                mediaCodec = c
+            } catch (e: Exception) {
+                mediaCodec?.release()
+                mediaCodec = null
             }
 
-            codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
+            if (mediaCodec == null) {
                 try {
-                    configure(format, surface, null, 0)
+                    val c = MediaCodec.createByCodecName("c2.android.avc.decoder")
+                    c.configure(format, surface, null, 0)
+                    c.start()
+                    mediaCodec = c
                 } catch (e: Exception) {
-                    // Fallback to basic format if low-latency/priority properties are rejected by the OEM decoder
-                    val fallbackFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-                    configure(fallbackFormat, surface, null, 0)
+                    mediaCodec?.release()
+                    mediaCodec = null
                 }
-                start()
             }
 
+            if (mediaCodec == null) {
+                val codecList = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+                for (info in codecList.codecInfos) {
+                    if (!info.isEncoder && info.supportedTypes.contains(MediaFormat.MIMETYPE_VIDEO_AVC)) {
+                        try {
+                            val c = MediaCodec.createByCodecName(info.name)
+                            c.configure(format, surface, null, 0)
+                            c.start()
+                            mediaCodec = c
+                            break
+                        } catch (e: Exception) {
+                            // continue trying
+                        }
+                    }
+                }
+            }
+
+            codec = mediaCodec ?: throw IllegalStateException("Could not start any H.264 decoder on device")
             isRunning.set(true)
 
             workerJob = scope.launch(Dispatchers.Default) {
