@@ -64,7 +64,8 @@ impl DisplayBackend for MutterDisplayBackend {
         // 3. Call RecordVirtual with properties
         let mut virtual_props: HashMap<&str, Value> = HashMap::new();
         virtual_props.insert("is-recording-indicator", Value::from(false));
-        virtual_props.insert("cursor-mode", Value::from(2u32));
+        virtual_props.insert("is-platform", Value::from(true));
+        virtual_props.insert("cursor-mode", Value::from(1u32));
 
         let stream_path: OwnedObjectPath = session_proxy
             .call("RecordVirtual", &(virtual_props,))
