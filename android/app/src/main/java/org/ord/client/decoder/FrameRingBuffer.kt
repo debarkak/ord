@@ -22,20 +22,15 @@ class FrameRingBuffer(
     private var isDropping = false
 
     fun offer(frame: EncodedVideoFrame): Boolean {
-        // Latency recovery mechanism:
-        // If queue exceeds maxCapacity, drop packets until the next keyframe arrives
-        if (count.get() >= maxCapacity) {
-            isDropping = true
+        // If queue exceeds capacity and a keyframe arrives, reset to keyframe
+        if (frame.isKeyframe && count.get() > 3) {
+            queue.clear()
+            count.set(0)
+            isDropping = false
         }
 
-        if (isDropping) {
-            if (frame.isKeyframe) {
-                // Clear queue and resume with the fresh keyframe
-                queue.clear()
-                count.set(0)
-                isDropping = false
-            } else {
-                // Drop non-keyframe to prevent decode backlog
+        if (count.get() >= maxCapacity) {
+            if (!frame.isKeyframe) {
                 return false
             }
         }

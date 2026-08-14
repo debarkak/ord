@@ -49,12 +49,15 @@ impl UsbAccessoryStream {
         if self.is_closed.load(Ordering::Relaxed) {
             return Err(anyhow!("USB connection closed"));
         }
-        let timeout = Duration::from_millis(500);
+        let timeout = Duration::from_millis(100);
         let mut written = 0;
+        let max_chunk = 16384;
         while written < data.len() {
-            let chunk = &data[written..];
+            let end = (written + max_chunk).min(data.len());
+            let chunk = &data[written..end];
             match self.handle.write_bulk(self.out_endpoint, chunk, timeout) {
-                Ok(n) => written += n,
+                Ok(n) if n > 0 => written += n,
+                Ok(_) => continue,
                 Err(rusb::Error::Timeout) => continue,
                 Err(e) => {
                     self.is_closed.store(true, Ordering::Relaxed);

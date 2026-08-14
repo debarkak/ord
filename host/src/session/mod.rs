@@ -6,7 +6,7 @@ use crate::encoder::{EncoderConfig, VideoFrame, VideoPipeline};
 use crate::input::mutter_input::MutterInputBackend;
 use crate::input::uinput_backend::UInputBackend;
 use crate::input::InputBackend;
-use crate::protocol::packet::OrdPacket;
+use crate::protocol::packet::{OrdHeader, OrdPacket, ORD_HEADER_SIZE};
 use crate::protocol::types::*;
 use crate::transport::tcp::FramedStream;
 use anyhow::{anyhow, Context, Result};
@@ -143,8 +143,8 @@ impl SessionHandler {
 
     pub async fn handle_usb_client(&self, stream: std::sync::Arc<crate::transport::usb::UsbAccessoryStream>) -> Result<()> {
         info!("Starting USB AOAP session handler...");
-        let (usb_in_tx, mut usb_in_rx) = mpsc::channel::<OrdPacket>(64);
-        let (usb_out_tx, mut usb_out_rx) = mpsc::channel::<Vec<u8>>(128);
+        let (usb_in_tx, mut usb_in_rx) = mpsc::channel::<OrdPacket>(120);
+        let (usb_out_tx, mut usb_out_rx) = mpsc::channel::<Vec<u8>>(120);
 
         // USB Read Worker Thread
         let read_stream = stream.clone();
@@ -155,18 +155,22 @@ impl SessionHandler {
                 match read_stream.read_packet_sync(&mut buf) {
                     Ok(n) if n > 0 => {
                         accumulator.extend_from_slice(&buf[..n]);
-                        while accumulator.len() >= 8 {
-                            let payload_len = u32::from_be_bytes([accumulator[4], accumulator[5], accumulator[6], accumulator[7]]) as usize;
-                            let total_len = 8 + payload_len;
-                            if accumulator.len() >= total_len {
-                                let packet_bytes = accumulator.drain(..total_len).collect::<Vec<u8>>();
-                                if let Ok(packet) = OrdPacket::decode(&packet_bytes) {
-                                    if usb_in_tx.blocking_send(packet).is_err() {
-                                        return;
+                        while accumulator.len() >= ORD_HEADER_SIZE {
+                            if let Ok(header) = OrdHeader::decode(&accumulator) {
+                                let total_len = ORD_HEADER_SIZE + header.payload_len as usize;
+                                if accumulator.len() >= total_len {
+                                    let packet_bytes = accumulator.drain(..total_len).collect::<Vec<u8>>();
+                                    if let Ok(packet) = OrdPacket::decode(&packet_bytes) {
+                                        if usb_in_tx.blocking_send(packet).is_err() {
+                                            return;
+                                        }
                                     }
+                                } else {
+                                    break;
                                 }
                             } else {
-                                break;
+                                // Drop invalid leading byte to search for next valid magic
+                                accumulator.remove(0);
                             }
                         }
                     }
@@ -266,7 +270,7 @@ impl SessionHandler {
         };
 
         // 6. Start Video Encoder Pipeline
-        let (frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(30);
+        let (frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(120);
         let encoder_config = EncoderConfig {
             width: display_info.width,
             height: display_info.height,

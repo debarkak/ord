@@ -36,7 +36,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
 
     private var activeTransport: OrdTransport? = null
     private var decoder: H264Decoder? = null
-    private val frameBuffer = FrameRingBuffer(maxCapacity = 2)
+    private val frameBuffer = FrameRingBuffer(maxCapacity = 10)
     private var touchHandler: TouchInputHandler? = null
 
     private var sessionJob: Job? = null
@@ -169,7 +169,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                     screenWidth = screenW,
                     screenHeight = screenH,
                     densityDpi = displayMetrics.densityDpi,
-                    maxFps = 60,
+                    maxFps = 90,
                     supportedCodecs = listOf("h264")
                 )
 

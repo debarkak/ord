@@ -25,27 +25,52 @@ class H264Decoder(
 
         try {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
                     setInteger(MediaFormat.KEY_PRIORITY, 0)
-                    setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
+                    setInteger(MediaFormat.KEY_OPERATING_RATE, 240)
                 }
             }
 
             var mediaCodec: MediaCodec? = null
-            try {
-                val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-                c.configure(format, surface, null, 0)
-                c.start()
-                mediaCodec = c
-            } catch (e: Exception) {
-                mediaCodec?.release()
-                mediaCodec = null
+
+            // 1. Try Qualcomm dedicated low-latency hardware decoder first
+            val preferredCodecs = listOf(
+                "c2.qti.avc.decoder.low_latency",
+                "c2.qti.avc.decoder",
+                "OMX.qcom.video.decoder.avc.low_latency",
+                "OMX.qcom.video.decoder.avc"
+            )
+
+            for (codecName in preferredCodecs) {
+                try {
+                    val c = MediaCodec.createByCodecName(codecName)
+                    c.configure(format, surface, null, 0)
+                    c.start()
+                    mediaCodec = c
+                    break
+                } catch (e: Exception) {
+                    mediaCodec?.release()
+                    mediaCodec = null
+                }
             }
 
+            // 2. Try standard system decoder by type
+            if (mediaCodec == null) {
+                try {
+                    val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    c.configure(format, surface, null, 0)
+                    c.start()
+                    mediaCodec = c
+                } catch (e: Exception) {
+                    mediaCodec?.release()
+                    mediaCodec = null
+                }
+            }
+
+            // 3. Fallback to software decoder only if hardware is unavailable
             if (mediaCodec == null) {
                 try {
                     val basicFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
@@ -59,57 +84,67 @@ class H264Decoder(
                 }
             }
 
-            codec = mediaCodec ?: throw IllegalStateException("Could not start any H.264 decoder on device")
+            val activeCodec = mediaCodec ?: throw IllegalStateException("Could not start any H.264 decoder on device")
+            codec = activeCodec
             isRunning.set(true)
 
+            // Worker Job: Continuous High-Speed Draining & Feeding
             workerJob = scope.launch(Dispatchers.Default) {
                 val bufferInfo = MediaCodec.BufferInfo()
 
-                while (isRunning.get() && isActive) {
-                    val activeCodec = codec ?: break
-                    var hadActivity = false
-
-                    // 1. Drain available output buffers to Surface with minimal latency
-                    try {
-                        var outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
-                        while (outIndex >= 0) {
-                            activeCodec.releaseOutputBuffer(outIndex, true)
-                            decodedFramesCount.incrementAndGet()
-                            hadActivity = true
-                            outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
-                        }
-                    } catch (e: Exception) {
-                        if (!isRunning.get()) break
-                    }
-
-                    // 2. Feed pending input frame
-                    val frame = frameBuffer.poll()
-                    if (frame != null) {
+                // Output Draining Coroutine (Max Framerate, Zero Delay)
+                launch(Dispatchers.Default) {
+                    while (isRunning.get() && isActive) {
                         try {
-                            val inIndex = activeCodec.dequeueInputBuffer(1_000) // 1ms max
-                            if (inIndex >= 0) {
-                                val inputBuffer = activeCodec.getInputBuffer(inIndex)
-                                if (inputBuffer != null) {
-                                    inputBuffer.clear()
-                                    inputBuffer.put(frame.data)
-                                    activeCodec.queueInputBuffer(
-                                        inIndex,
-                                        0,
-                                        frame.data.size,
-                                        frame.timestampUs,
-                                        0
-                                    )
-                                    hadActivity = true
-                                }
-                            } else {
-                                droppedFramesCount.incrementAndGet()
+                            var outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
+                            var drained = 0
+                            while (outIndex >= 0) {
+                                activeCodec.releaseOutputBuffer(outIndex, true)
+                                decodedFramesCount.incrementAndGet()
+                                drained++
+                                outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
+                            }
+                            if (drained == 0) {
+                                delay(1)
                             }
                         } catch (e: Exception) {
                             if (!isRunning.get()) break
                         }
                     }
+                }
 
-                    if (!hadActivity) {
+                // Input Feeding Loop (Instant queueing)
+                while (isRunning.get() && isActive) {
+                    val frame = frameBuffer.poll()
+                    if (frame != null) {
+                        try {
+                            var queued = false
+                            for (attempt in 0..5) {
+                                val inIndex = activeCodec.dequeueInputBuffer(2_000) // 2ms timeout
+                                if (inIndex >= 0) {
+                                    val inputBuffer = activeCodec.getInputBuffer(inIndex)
+                                    if (inputBuffer != null) {
+                                        inputBuffer.clear()
+                                        inputBuffer.put(frame.data)
+                                        activeCodec.queueInputBuffer(
+                                            inIndex,
+                                            0,
+                                            frame.data.size,
+                                            frame.timestampUs,
+                                            0
+                                        )
+                                        queued = true
+                                        break
+                                    }
+                                }
+                            }
+                            if (!queued) {
+                                droppedFramesCount.incrementAndGet()
+                            }
+                        } catch (e: Exception) {
+                            if (!isRunning.get()) break
+                        }
+                    } else {
                         delay(1)
                     }
                 }
