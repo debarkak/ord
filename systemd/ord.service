@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenRemoteDisplay (ORD) Linux Host Daemon
+Documentation=https://github.com/debarkak/ord
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/ord start
+Restart=on-failure
+RestartSec=3
+Environment=RUST_LOG=ord=info
+Environment=XDG_SESSION_TYPE=wayland
+
+[Install]
+WantedBy=graphical-session.target

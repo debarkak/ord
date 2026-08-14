@@ -1,0 +1,36 @@
+[package]
+name = "ord-host"
+version = "0.1.0"
+edition = "2021"
+authors = ["ORD Contributors"]
+description = "OpenRemoteDisplay host daemon and CLI for Linux"
+license = "Apache-2.0"
+
+[[bin]]
+name = "ord"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+zbus = { version = "5.5", features = ["tokio"] }
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+byteorder = "1.5"
+socket2 = "0.5"
+anyhow = "1.0"
+thiserror = "2.0"
+bytes = "1.10"
+futures-util = "0.3"
+async-trait = "0.1"
+hostname = "0.4"
+dirs = "6.0"
+
+[dev-dependencies]
+tempfile = "3.17"

@@ -1,0 +1,2180 @@
+ORD (OpenRemoteDisplay) — Conversation Dump
+==============================================
+
+PURPOSE
+-------
+This file consolidates the technical discussion from the conversation about spacedesk and the planned open-source ORD project.
+
+IMPORTANT:
+This is a reconstruction of the conversation's technical content and decisions. It is intended as a reference for a coding agent. It is not a verbatim transcript of every sentence, but it preserves the substantive technical information, architecture, constraints, distinctions, and recommendations discussed.
+
+1. SPACE DESK — MVP DESCRIPTION
+-------------------------------
+
+spacedesk, in MVP terms, can be described as:
+
+"spacedesk is software that lets you use another device—such as a laptop, tablet, or phone—as an additional display for your main computer over a network."
+
+The simplest MVP requires:
+
+1. Host app — runs on the main PC and captures/provides its display output.
+2. Client app — runs on the secondary device and displays the received frames.
+3. Network connection — transfers display data between the two devices.
+4. Virtual display — the host creates an additional monitor that the operating system can use.
+5. Basic input forwarding — optionally sends touch/mouse input from the client back to the host.
+
+In one sentence:
+
+"spacedesk MVP = turn a second device into a wireless/network-connected secondary monitor for your PC."
+
+Everything beyond that—multiple displays, touch support, resolution/orientation controls, performance optimization, USB/network options, etc.—is additional functionality built around that core concept.
+
+2. SPACE DESK AND USB ANDROID COMMUNICATION
+-------------------------------------------
+
+The discussion distinguished spacedesk's native Android USB mode from ordinary USB tethering.
+
+Important distinction:
+
+- Native spacedesk Android USB mode is a dedicated USB connection mechanism.
+- spacedesk documentation discusses Android Open Accessory Protocol (AOAP) in relation to Android USB compatibility.
+- USB tethering is different: Android exposes a network interface over USB, and ordinary TCP/IP networking can then run through it.
+- Native spacedesk USB mode should not be simplistically described as "USB networking + TCP/IP."
+
+Conceptual native USB architecture:
+
+Windows PC
+    |
+    | spacedesk host / display pipeline
+    |
+    | USB / AOAP-related transport
+    |
+Android spacedesk Viewer
+    |
+    | rendering
+
+Conceptual USB tethering architecture:
+
+Windows
+    |
+    | USB
+    |
+Android USB network interface
+    |
+    | TCP/IP
+    |
+spacedesk Viewer
+
+AOAP should be understood as the USB accessory/access mechanism, not automatically as the entire proprietary spacedesk display protocol.
+
+The exact proprietary spacedesk application-level protocol is not publicly documented in the material discussed.
+
+3. SPACE DESK HOST / SERVER ARCHITECTURE
+----------------------------------------
+
+The Windows spacedesk host is not simply a screenshot-taking application.
+
+The important architectural concept is:
+
+virtual display driver + display pipeline + server/service + transport + client viewer.
+
+Conceptual Windows architecture:
+
+WINDOWS HOST
+
+Windows Desktop
+    |
+    v
+Windows Graphics Stack
+    |
+    v
+spacedesk WDDM Display Driver
+    |
+    v
+Virtual Monitor
+    |
+    v
+Display/frame updates
+    |
+    v
+spacedesk Service
+    |
+    +-- encoding/compression
+    |
+    +-- session management
+    |
+    +-- networking/server
+    |
+    v
+TCP/IP / USB transport
+    |
+    v
+Android Viewer
+
+The spacedesk installation includes components such as:
+
+- spacedeskService.exe
+- spacedeskDisplayUmode*.dll
+- spacedeskDriverAndroidUsb.sys
+- spacedeskDriverAndroidControl.sys
+- spacedeskDriverBus.sys
+
+The exact names/components can vary by version, so they should be verified against current releases rather than hardcoded as universal facts.
+
+4. THE VIRTUAL DISPLAY IS THE KEY
+---------------------------------
+
+The central concept is that Windows is made to believe it has another monitor.
+
+Conceptually:
+
+GPU
+    |
+    +-- Monitor 1 -> physical laptop display
+    |
+    +-- Monitor 2 -> spacedesk virtual display
+
+Windows display settings can therefore expose a second display.
+
+For example:
+
+Display 1:
+    1920x1080 physical laptop panel
+
+Display 2:
+    1920x1080 spacedesk virtual display
+
+When a user moves a window onto Display 2, Windows itself renders that window into the virtual display's surface/framebuffer.
+
+This is why spacedesk can act as a desktop extension rather than merely mirroring an existing screen.
+
+The host's display driver effectively tells Windows:
+
+"I am another display device. Here are my supported resolutions, orientations, modes, etc."
+
+5. HOST FRAME PIPELINE
+----------------------
+
+A conceptual host pipeline is:
+
+Windows graphics
+    |
+    v
+Virtual display
+    |
+    v
+Display updates / frames
+    |
+    v
+spacedesk capture/stream pipeline
+    |
+    v
+Encoder/compressor
+    |
+    v
+Transport
+    |
+    v
+Viewer
+
+The official conceptual description is essentially capture -> compress -> transmit -> viewer.
+
+The system does not necessarily have to transmit a completely independent raw full-screen bitmap every time. Display update/frame handling can be optimized.
+
+6. WHY RAW FRAMES ARE IMPRACTICAL
+---------------------------------
+
+Example:
+
+1920 x 1080 x 4 bytes per pixel
+= 8,294,400 bytes
+= about 7.9 MiB per raw frame
+
+At 60 FPS:
+
+8.29 MB x 60
+~ 498 MB/s
+
+This is far too much for ordinary network display streaming.
+
+Therefore compression/video encoding is required.
+
+7. H.264 AND ENCODING
+---------------------
+
+Modern spacedesk releases have included H.264 encoder improvements and hardware encoding support.
+
+Conceptual pipeline:
+
+Virtual display
+    |
+    v
+Display update
+    |
+    v
+H.264 encoder
+    |
+    +-- CPU/software encoding
+    |
+    OR
+    |
+    +-- hardware encoding
+    |
+    v
+Compressed display/video data
+    |
+    v
+Network transport
+
+The exact proprietary spacedesk encoding/packetization details are not publicly documented and should not be assumed.
+
+8. SPACE DESK SERVER / SERVICE
+------------------------------
+
+spacedeskService.exe is the server/service-side component.
+
+Conceptually it coordinates:
+
+- client/session management
+- display connection handling
+- networking
+- discovery
+- display stream
+- input/control
+- connection loss/reconnection behavior
+- server startup
+- security/configuration
+
+The service is installed as a Windows service.
+
+Settings can include things such as:
+
+- automatic server startup
+- connection-loss delay
+- connection-close delay
+- password protection
+- encryption
+
+These details can vary by spacedesk version.
+
+9. HOST DISCOVERY
+-----------------
+
+The Android Viewer needs to find available Windows spacedesk hosts.
+
+Conceptually:
+
+Android Viewer
+    |
+    | "Who is running spacedesk?"
+    |
+    v
+LAN discovery
+    |
+    +--> PC #1
+    +--> PC #2
+    +--> PC #3
+
+Then the Viewer can display a list such as:
+
+DESKTOP-PC
+192.168.x.x
+
+The exact discovery protocol was not established in the conversation and should not be guessed without packet capture/reverse engineering.
+
+10. NETWORK TRANSPORT
+---------------------
+
+For conventional network operation, spacedesk uses TCP/IP.
+
+Conceptual path:
+
+Windows spacedesk server
+    |
+    v
+TCP/IP
+    |
+    v
+Wi-Fi / Ethernet
+    |
+    v
+Android Viewer
+
+The exact application protocol layered over TCP/IP is proprietary/not publicly specified.
+
+11. ANDROID CLIENT ARCHITECTURE
+-------------------------------
+
+The Android spacedesk Viewer is the other half of the display pipeline.
+
+High-level architecture:
+
+ANDROID DEVICE
+
+spacedesk Viewer
+    |
+    +-- device/host discovery
+    |
+    +-- connection/session manager
+    |
+    +-- spacedesk protocol/transport
+    |
+    +-- receive/depacketize
+    |
+    +-- decode display stream
+    |
+    +-- Android graphics renderer
+    |
+    v
+physical screen
+
+Input path:
+
+Android touch / mouse / control
+    |
+    v
+Viewer
+    |
+    v
+transport/protocol
+    |
+    v
+Windows host
+    |
+    v
+input subsystem
+
+12. ANDROID SESSION ESTABLISHMENT
+---------------------------------
+
+When the Android Viewer starts:
+
+1. Initialize networking/display components.
+2. Discover available hosts.
+3. User selects a host.
+4. Viewer establishes a display session.
+5. Host and client negotiate configuration/capabilities.
+6. Windows configures a virtual display.
+7. Host starts streaming it.
+8. Android receives and renders the stream.
+
+Negotiated information may include:
+
+- display dimensions
+- orientation
+- supported encoding/compression
+- input capabilities
+- display configuration
+- transport/session parameters
+
+Exact proprietary negotiation packets are not publicly documented.
+
+13. ANDROID IS NOT CREATING THE WINDOWS DESKTOP
+-----------------------------------------------
+
+The Windows host creates the virtual display.
+
+Android is essentially receiving the pixels belonging to that virtual display.
+
+Conceptual path:
+
+Windows virtual monitor
+    |
+    v
+spacedesk host
+    |
+    v
+transport
+    |
+    v
+Android Viewer
+    |
+    v
+Android display
+
+This is why it is a secondary-monitor system rather than an Android app pretending to be a desktop.
+
+14. ANDROID VIDEO DECODING
+--------------------------
+
+The Android client receives compressed display/video data.
+
+Conceptual pipeline:
+
+Network / USB
+    |
+    v
+Receive buffers
+    |
+    v
+Protocol parser
+    |
+    v
+Frame / stream decoder
+    |
+    v
+Android renderer
+    |
+    v
+screen
+
+H.264 is relevant because it provides efficient compression and broad Android hardware decoder support.
+
+The intended Android implementation should use Android MediaCodec rather than decoding every frame into software bitmaps.
+
+15. ANDROID HARDWARE DECODING
+-----------------------------
+
+Preferred conceptual pipeline:
+
+H.264
+    |
+    v
+Android MediaCodec
+    |
+    v
+Surface
+    |
+    v
+Android compositor/GPU
+    |
+    v
+display
+
+MediaCodec can expose hardware-accelerated codecs when supported by the device.
+
+The Galaxy Tab A9+ should be tested for actual H.264 decoder capabilities rather than relying on assumed specifications.
+
+16. ANDROID INPUT
+-----------------
+
+The Viewer can send touch/mouse/control events back to Windows.
+
+Example:
+
+Android touchscreen
+    |
+    v
+MotionEvent
+    |
+    v
+spacedesk Viewer
+    |
+    v
+input/control message
+    |
+    v
+Windows spacedesk input driver
+    |
+    v
+Windows input subsystem
+
+Potential input types include:
+
+- touch
+- mouse
+- keyboard
+- stylus
+- multi-touch
+
+For an MVP, basic touch/mouse is sufficient.
+
+17. COORDINATE TRANSFORMATION
+----------------------------
+
+Android physical pixels may differ from the virtual monitor dimensions.
+
+Example:
+
+Android:
+1080 x 2400
+
+Virtual monitor:
+1920 x 1080
+
+Therefore:
+
+Android coordinate
+    |
+    v
+Viewer coordinate transform
+    |
+    v
+virtual monitor coordinate
+    |
+    v
+Windows input
+
+The implementation must account for:
+
+- scaling
+- orientation
+- rotation
+- aspect ratio
+- letterboxing
+- display density
+
+18. LATENCY PIPELINE
+--------------------
+
+End-to-end display latency is approximately:
+
+Windows rendering
+    +
+capture
+    +
+encoding
+    +
+network/USB transport
+    +
+Android receiving
+    +
+decoding
+    +
+GPU rendering
+    +
+display refresh
+
+The system should prioritize low latency and avoid excessive buffering.
+
+19. SPACEDESK USB MODE
+----------------------
+
+The discussion emphasized that native spacedesk Android USB mode is different from ordinary USB tethering.
+
+spacedesk's Windows installation includes dedicated Android USB/control components such as:
+
+- spacedeskDriverAndroidUsb.sys
+- spacedeskDriverAndroidControl.sys
+
+Conceptual path:
+
+Android Viewer
+    |
+    v
+Android USB interface/accessory mechanism
+    |
+    v
+USB cable
+    |
+    v
+Windows spacedesk USB driver
+    |
+    v
+spacedesk server/session
+
+AOAP was discussed as part of spacedesk's Android USB compatibility story.
+
+However, ORD should NOT assume it must use AOAP just because spacedesk does.
+
+ORD is a new open-source project and should select its own transport architecture.
+
+20. LINUX SUPPORT IN SPACE DESK
+-------------------------------
+
+At the time of discussion, official spacedesk host/primary-machine support is Windows-focused.
+
+Linux is not an official spacedesk host/primary platform.
+
+Linux can be used as a client through the HTML5 Viewer approach, but that is different from having a Linux host driver.
+
+A spacedesk forum statement from July 2025 was referenced saying a Linux Driver was "currently not in our plans."
+
+Therefore the project opportunity is:
+
+Build an open-source spacedesk-like host specifically for Linux.
+
+21. ORD PROJECT CONCEPT
+-----------------------
+
+Project name:
+
+ORD
+
+Expanded name:
+
+OpenRemoteDisplay
+
+Goal:
+
+Build an open-source Linux-native alternative to the user-facing concept of spacedesk.
+
+Core behavior:
+
+Linux computer exposes a real virtual display.
+Android device connects to it.
+Android becomes a secondary monitor.
+Linux desktop treats it as an additional display.
+
+Do NOT simply build VNC/screen sharing.
+
+Do NOT clone the proprietary spacedesk protocol.
+
+Use an original open protocol and implementation.
+
+22. ORD TARGET SYSTEM
+---------------------
+
+Primary Linux environment:
+
+- EndeavourOS
+- Arch-based
+- GNOME
+- Wayland
+- laptop
+
+Primary Android test device:
+
+- Samsung Galaxy Tab A9+ Wi-Fi
+- One UI 8.0
+- Android 16
+- Chinese ROM
+- GMS availability should not be assumed
+
+Android support:
+
+- minimum Android 10
+- target Android 16
+- optimize for Android 16
+- maintain compatibility with Android 10–15
+- no mandatory Google Mobile Services
+
+23. ORD HIGH-LEVEL ARCHITECTURE
+-------------------------------
+
+LINUX HOST
+
+GNOME / Wayland
+    |
+    v
+Virtual display output
+    |
+    v
+Frame capture
+    |
+    v
+Hardware H.264 encoder
+    |
+    v
+ORD protocol
+    |
+    v
+TCP / Wi-Fi / Ethernet / future USB
+    |
+    v
+
+ANDROID CLIENT
+
+ORD Android app
+    |
+    v
+Network/USB receiver
+    |
+    v
+ORD protocol
+    |
+    v
+H.264 decoder / MediaCodec
+    |
+    v
+Surface / GPU
+    |
+    v
+tablet display
+
+Input:
+
+Android touch/mouse/keyboard
+    |
+    v
+ORD protocol
+    |
+    v
+Linux input backend
+    |
+    v
+uinput or appropriate compositor/input mechanism
+
+24. ORD VIRTUAL DISPLAY
+-----------------------
+
+This is the hardest and most important host component.
+
+Potential approaches discussed:
+
+A. DRM/KMS virtual display
+
+Create a virtual DRM connector/output.
+
+Conceptual Linux display layout:
+
+DRM/KMS
+    |
+    +-- HDMI-1
+    +-- DP-1
+    +-- ORD-1
+
+This is the preferred long-term "real monitor" style architecture.
+
+B. Compositor-specific virtual output
+
+Possible backends for:
+
+- GNOME/Mutter
+- KDE/KWin
+- COSMIC
+- wlroots
+
+This can be easier in some cases but increases maintenance.
+
+C. EVDI
+
+EVDI provides virtual display functionality and is used by some Linux display/streaming projects.
+
+Could be a useful MVP/backend option if appropriate.
+
+The project should not blindly choose one approach. Inspect the actual system and current Linux APIs.
+
+25. GNOME + WAYLAND PRIORITY
+----------------------------
+
+GNOME on Wayland is the primary target.
+
+Do not optimize only for X11.
+
+Use modern Linux graphics APIs.
+
+Investigate:
+
+- DRM/KMS
+- Mutter virtual display capabilities
+- PipeWire
+- DMA-BUF
+- GBM
+- EGL
+- VA-API
+- FFmpeg
+- EVDI
+- existing open-source virtual display projects
+
+Avoid relying on private GNOME internals unless necessary.
+
+If a GNOME-specific integration is needed, isolate it behind a backend interface.
+
+Possible abstraction:
+
+DisplayBackend
+    |
+    +-- GnomeWaylandBackend
+    +-- DrmKmsBackend
+    +-- EvdiBackend
+    +-- FutureBackend
+
+26. FRAME CAPTURE
+-----------------
+
+Preferred eventual architecture:
+
+Virtual display
+    |
+    v
+GPU
+    |
+    v
+DMA-BUF
+    |
+    v
+hardware encoder
+
+Avoid unnecessary:
+
+GPU -> CPU RAM -> CPU copy -> encoder
+
+where possible.
+
+CPU fallback is useful for debugging/compatibility.
+
+PipeWire can be useful in Wayland capture contexts, but a true virtual-display pipeline may be better captured closer to DRM/KMS depending on the backend.
+
+27. H.264 ENCODER ABSTRACTION
+----------------------------
+
+Recommended encoder abstraction:
+
+Encoder
+    |
+    +-- H264VAAPI
+    +-- H264NVENC
+    +-- H264Software
+    +-- future HEVC
+    +-- future AV1
+
+H.264 should be the first mandatory codec.
+
+Detect hardware dynamically.
+
+Do not assume GPU vendor.
+
+Software H.264 must remain a fallback.
+
+Potential encoder configuration:
+
+- bitrate
+- FPS
+- resolution
+- GOP/keyframe interval
+- profile
+- level
+- bitrate mode
+- low-latency mode
+
+28. ORD PROTOCOL
+----------------
+
+Create an original protocol called:
+
+ORD Protocol
+
+Version it:
+
+ORD/1
+
+Do not implement spacedesk's proprietary protocol.
+
+Suggested initial messages:
+
+HELLO
+HELLO_ACK
+CAPABILITIES
+AUTH
+AUTH_ACK
+DISPLAY_CONFIG
+DISPLAY_CONFIG_ACK
+STREAM_START
+STREAM_STOP
+VIDEO_CONFIG
+VIDEO_DATA
+INPUT_EVENT
+INPUT_CONFIG
+PING
+PONG
+ERROR
+DISCONNECT
+
+The exact message set can be changed if engineering reveals a better design.
+
+Separate:
+
+- session/control
+- display configuration
+- video transport
+- input/control
+
+Use:
+
+- explicit lengths
+- versioning
+- capability negotiation
+- forward-compatible fields
+- safe handling of unknown messages
+
+Document in:
+
+docs/protocol.md
+
+29. ORD TRANSPORT
+-----------------
+
+Initial MVP:
+
+TCP
+
+Architecture:
+
+Transport
+    |
+    +-- TcpTransport
+    +-- UsbTransport
+    +-- future QuicTransport
+
+Do not build complex UDP/QUIC before the basic system works.
+
+Future possibilities:
+
+- UDP
+- QUIC
+- reliable datagrams
+- RTP-like packetization
+- custom low-latency transport
+
+30. VIDEO PACKETIZATION
+----------------------
+
+Video data should be packetized safely.
+
+A conceptual packet could contain:
+
+magic
+protocol_version
+message_type
+flags
+session_id
+frame_id
+packet_id
+packet_count
+payload_length
+payload
+
+This is only a conceptual example; actual implementation can differ.
+
+31. DISPLAY NEGOTIATION
+-----------------------
+
+Android should report capabilities such as:
+
+device:
+    width
+    height
+    density
+    orientation
+    refresh rate
+
+codecs:
+    H264
+
+decoder capabilities:
+    profiles
+    levels
+    maximum resolution
+    maximum FPS
+
+The host selects an appropriate virtual display mode.
+
+Do not hardcode the Galaxy Tab A9+ panel parameters.
+
+Inspect the actual device.
+
+32. ANDROID CLIENT DESIGN
+-------------------------
+
+Create:
+
+ord-android
+
+Use Kotlin.
+
+Core screens:
+
+1. Host discovery
+2. Connection
+3. Active display
+4. Settings
+5. Diagnostics/about
+
+Display screen should maximize the remote display area.
+
+Easy disconnect mechanism required.
+
+33. ANDROID GMS-FREE REQUIREMENT
+--------------------------------
+
+Core functionality must not depend on:
+
+- Google Play Services
+- Firebase
+- Google Sign-In
+- Play Integrity
+- FCM
+- Google Play Store
+- any mandatory Google API
+
+The APK should install directly.
+
+Potential supported environments:
+
+- AOSP
+- LineageOS
+- GrapheneOS
+- /e/OS
+- Huawei-like GMS-free environments
+- custom ROMs
+
+provided required Android hardware/media APIs work.
+
+34. ANDROID MEDIACODEC PIPELINE
+--------------------------------
+
+Preferred:
+
+Socket/network
+    |
+    v
+ORD packet parser
+    |
+    v
+H.264 NAL/frame reconstruction
+    |
+    v
+MediaCodec
+    |
+    v
+Surface
+    |
+    v
+Android compositor
+
+Use hardware decoder where available.
+
+Handle:
+
+- initialization failure
+- codec reconfiguration
+- resolution changes
+- orientation changes
+- disconnect
+- malformed packets
+- decoder stalls
+- sleep/wake
+
+35. GALAXY TAB A9+ OPTIMIZATION
+-------------------------------
+
+Primary test device:
+
+Samsung Galaxy Tab A9+
+Wi-Fi
+One UI 8.0
+Android 16
+Chinese ROM
+
+Optimize for:
+
+- landscape mode
+- large display
+- high sustained FPS
+- low latency
+- hardware H.264 decoding
+- low CPU usage
+- low battery usage
+- stable Surface rendering
+- Wi-Fi
+- screen sleep/wake
+
+Do not assume GMS.
+
+Inspect actual capabilities with ADB.
+
+Suggested inspection:
+
+adb shell getprop ro.build.version.sdk
+adb shell getprop ro.build.version.release
+adb shell getprop ro.product.model
+adb shell getprop ro.product.manufacturer
+adb shell dumpsys media.codec
+adb shell dumpsys display
+adb shell wm size
+adb shell wm density
+
+36. LINUX ENVIRONMENT INSPECTION
+--------------------------------
+
+Before implementation, inspect actual host environment.
+
+Suggested commands:
+
+uname -a
+cat /etc/os-release
+echo $XDG_SESSION_TYPE
+gnome-shell --version
+mutter --version
+wayland-info
+vulkaninfo
+vainfo
+ffmpeg -encoders
+ffmpeg -decoders
+ls /dev/dri
+lsmod
+pw-cli info
+systemctl --user status pipewire
+systemctl --user status wireplumber
+
+Only use commands available.
+
+Determine:
+
+- OS
+- kernel
+- GNOME
+- Mutter
+- Wayland
+- GPU
+- driver
+- Mesa
+- DRM devices
+- VA-API
+- FFmpeg encoder support
+- PipeWire
+- network interfaces
+
+37. ANDROID INPUT FOR ORD
+-------------------------
+
+Implement:
+
+ACTION_DOWN
+ACTION_MOVE
+ACTION_UP
+ACTION_CANCEL
+
+Then potentially:
+
+- multi-touch
+- stylus
+- mouse
+- keyboard
+
+Host can use Linux uinput.
+
+Potential virtual devices:
+
+ORD Virtual Mouse
+ORD Virtual Touchscreen
+ORD Virtual Keyboard
+
+Abstraction:
+
+InputBackend
+    |
+    +-- UInputBackend
+    +-- FutureWaylandBackend
+
+38. DISCOVERY
+-------------
+
+ORD should automatically discover local hosts.
+
+Host advertises:
+
+- hostname
+- ORD version
+- supported protocol
+- available display capabilities
+- security state
+
+Manual IP entry should remain available.
+
+Discovery is not mandatory for actual connectivity.
+
+39. SECURITY
+------------
+
+Do not expose an unauthenticated display/input server without warning.
+
+Use established cryptography.
+
+Do not invent crypto.
+
+Possible design:
+
+LAN discovery
+    |
+    v
+user selects host
+    |
+    v
+secure session
+    |
+    v
+authenticated ORD protocol
+
+Potentially use TLS.
+
+Pairing could use a numeric code.
+
+Example:
+
+Linux:
+Pairing code 482913
+
+Android:
+Enter code
+
+Store pairing identity securely.
+
+Never log secrets.
+
+40. USB TRANSPORT FOR ORD
+-------------------------
+
+USB is desirable but should not block Wi-Fi MVP.
+
+Initial:
+
+TCP/Wi-Fi
+
+Later:
+
+USB transport
+
+Same ORD protocol over both.
+
+Conceptual:
+
+ORD Protocol
+    |
+    +-- TCP
+    |
+    +-- USB
+    |
+    +-- future QUIC
+
+Do not assume AOAP is necessary.
+
+Investigate Android USB Host/Accessory capabilities and Linux USB interfaces.
+
+If direct USB accessory is difficult, consider USB networking only if technically appropriate, while clearly documenting the distinction.
+
+41. NO INTERNET REQUIREMENT
+---------------------------
+
+ORD should work entirely on local connectivity.
+
+No cloud service required.
+
+No account required.
+
+No telemetry requirement.
+
+No Google dependency.
+
+Discovery, pairing, streaming, and input should work without internet.
+
+42. MULTIPLE CLIENTS / DISPLAYS
+-------------------------------
+
+Architect for multiple clients even if MVP supports one.
+
+Potential future:
+
+ord-host
+    |
+    +-- session 1 -> tablet
+    +-- session 2 -> phone
+    +-- session 3 -> laptop
+
+Potential multiple displays:
+
+ORD Display 1
+ORD Display 2
+ORD Display 3
+
+MVP can be one display/client.
+
+43. PERFORMANCE
+---------------
+
+Target:
+
+- 60 FPS where hardware allows
+- H.264
+- hardware encoding
+- hardware decoding
+- low CPU usage
+- low network latency
+- minimal buffering
+
+Latency is more important than perfect compression.
+
+Prefer dropping stale frames over allowing latency to grow.
+
+44. ADAPTIVE QUALITY
+--------------------
+
+Eventually monitor:
+
+- RTT
+- packet loss
+- encoder time
+- decoder time
+- queue depth
+- throughput
+- frame latency
+
+Adapt:
+
+- bitrate
+- FPS
+- resolution
+- keyframe frequency
+
+Example:
+
+Good:
+60 FPS, high bitrate
+
+Poor:
+45 FPS, lower bitrate
+
+Severe:
+30 FPS, lower bitrate
+
+45. ANDROID MEMORY MANAGEMENT
+-----------------------------
+
+Avoid allocating huge new byte arrays per packet/frame.
+
+Use:
+
+- reusable buffers
+- bounded queues
+- bounded frame queues
+
+If decoder falls behind:
+
+drop stale frames.
+
+Latest desktop frame is more useful than an old frame.
+
+46. CONFIGURATION
+-----------------
+
+Potential Linux config:
+
+~/.config/ord/
+or
+/etc/ord/
+
+Potential config.toml:
+
+[server]
+enabled = true
+port = ...
+
+[display]
+width = ...
+height = ...
+refresh_rate = ...
+
+[stream]
+codec = "h264"
+bitrate = ...
+fps = ...
+
+[security]
+require_pairing = true
+
+Do not hardcode IP/resolution/GPU/device.
+
+47. SYSTEMD
+-----------
+
+Provide systemd integration.
+
+Potential:
+
+systemctl --user enable --now ord
+
+Prefer least privilege.
+
+Only privileged components should run privileged if absolutely required.
+
+48. CLI
+-------
+
+Useful commands:
+
+ord status
+ord start
+ord stop
+ord hosts
+ord sessions
+ord display
+ord diagnostics
+ord logs
+
+Basic debugging should not require a GUI.
+
+49. DIAGNOSTICS
+---------------
+
+Implement:
+
+ord diagnostics
+
+Report:
+
+Host:
+    OS
+    kernel
+    GNOME
+    Wayland
+
+GPU:
+    vendor/device
+
+Display backend:
+    DRM/KMS / EVDI / GNOME/etc.
+
+Encoder:
+    H264 VA-API
+    hardware yes/no
+
+Network:
+    Wi-Fi/Ethernet
+
+Sessions:
+    count
+
+50. LOGGING
+-----------
+
+Use structured logging.
+
+Levels:
+
+ERROR
+WARN
+INFO
+DEBUG
+TRACE
+
+Allow debug logging through environment/config.
+
+Never log:
+
+- passwords
+- pairing secrets
+- private keys
+- authentication tokens
+
+51. METRICS
+-----------
+
+Expose:
+
+- FPS
+- bitrate
+- encoder latency
+- network RTT
+- packet loss
+- decode latency if available
+- dropped frames
+- queued frames
+- resolution
+- codec
+- transport
+
+Android debug overlay example:
+
+FPS: 59.8
+Bitrate: 18.2 Mbps
+RTT: 7 ms
+Decoder: hardware
+Resolution: 1920x1080
+Codec: H.264
+Dropped: 3
+
+52. BATTERY
+-----------
+
+Android should:
+
+- use hardware decoding
+- minimize wakeups
+- use Surface rendering
+- minimize allocations
+- reuse buffers
+- separate networking/decoder work
+- handle lifecycle correctly
+
+When disconnected, release:
+
+- decoder
+- sockets
+- buffers
+- wakelocks
+- rendering resources
+
+53. DISPLAY RESOLUTION
+----------------------
+
+Do not blindly force Android physical resolution.
+
+Offer:
+
+- native
+- 1920x1080
+- 1600x900
+- 1280x720
+
+Potential presets:
+
+Low
+Balanced
+High
+Native
+
+Advanced:
+
+width
+height
+FPS
+bitrate
+
+54. ORIENTATION
+---------------
+
+Support:
+
+- portrait
+- landscape
+- reverse portrait
+- reverse landscape
+
+Galaxy Tab A9+ can be optimized around landscape.
+
+Prefer true virtual-display reconfiguration where feasible.
+
+55. TABLET UX
+------------
+
+For the Galaxy Tab A9+:
+
+- landscape-first
+- large touch targets
+- desktop-like connection UI
+- mouse/keyboard support
+- external keyboard support
+- no unnecessary phone-only UI
+
+56. BUILD SYSTEM
+----------------
+
+Host:
+
+Cargo / Rust
+
+Android:
+
+Gradle
+Kotlin
+Android Gradle Plugin
+
+Possible repository:
+
+ord/
+    host/
+    android/
+    protocol/
+    docs/
+    scripts/
+    tests/
+    tools/
+    LICENSE
+    README.md
+    dump.txt
+
+Exact structure can be improved by the coding agent.
+
+57. TESTING
+----------
+
+Host tests:
+
+- protocol
+- serialization
+- packets
+- configuration
+- coordinate transforms
+- display modes
+- transport
+
+Android tests:
+
+- protocol parser
+- coordinate transforms
+- configuration
+- lifecycle
+
+Integration:
+
+Linux host <-> Android client
+
+Manual hardware testing is expected where automation is impossible.
+
+58. TEST PATTERNS
+-----------------
+
+Create tools for:
+
+- color bars
+- moving rectangles
+- static desktop
+- high-motion scenes
+- text-heavy scenes
+
+Potential command:
+
+ord-test-pattern
+
+Use to evaluate:
+
+- compression
+- latency
+- dropped frames
+- decoder
+- bandwidth
+
+59. END-TO-END LATENCY TEST
+---------------------------
+
+Eventually create a test pattern showing:
+
+FRAME ID: 12345
+TIMESTAMP: ...
+
+Use frame IDs/timestamps to estimate:
+
+capture
+encode
+network
+decode
+render
+
+Do not rely solely on subjective feel.
+
+60. FAILURE HANDLING
+--------------------
+
+Host unavailable:
+    Android shows Host unavailable.
+
+Decoder unavailable:
+    Android explains that a compatible H.264 decoder is unavailable.
+
+Encoder unavailable:
+    Host falls back to software.
+
+Virtual display unavailable:
+    Host reports useful diagnostics.
+
+Network disconnect:
+    cleanly terminate and reconnect if enabled.
+
+Display configuration failure:
+    do not leave GNOME in a broken state.
+
+61. CLEAN SHUTDOWN
+------------------
+
+When Android disconnects:
+
+1. Stop video stream.
+2. Release session.
+3. Destroy/disable virtual display.
+4. Restore normal display state if needed.
+5. Release encoder.
+6. Release capture resources.
+7. Release network resources.
+
+Avoid ghost displays.
+
+62. CRASH SAFETY
+---------------
+
+If ORD crashes:
+
+- do not leave the display system broken
+- clean temporary resources
+- handle systemd restarts safely
+- handle stale sessions
+- clean DRM/display resources
+
+63. CODE QUALITY
+----------------
+
+Avoid:
+
+- giant monolithic files
+- uncontrolled global state
+- magic numbers
+- hardcoded IPs
+- hardcoded resolutions
+- hardcoded GPU assumptions
+- hardcoded GNOME version
+- hardcoded Samsung behavior
+
+Prefer:
+
+- interfaces/traits
+- modular backends
+- capability detection
+- configuration
+- feature detection
+- clear errors
+
+64. RECOMMENDED REPOSITORY ARCHITECTURE
+---------------------------------------
+
+ord/
+    daemon/
+        session
+        discovery
+        protocol
+        transport
+        security
+
+    display/
+        drm-kms
+        evdi
+        compositor
+
+    capture/
+        dmabuf
+        pipewire
+        framebuffer
+
+    encoder/
+        vaapi
+        nvenc
+        software
+
+    input/
+        uinput
+
+    android/
+        discovery
+        transport
+        decoder
+        renderer
+        input
+
+    protocol/
+        shared definitions
+
+    docs/
+    tests/
+    tools/
+
+The exact organization can differ if justified.
+
+65. RECOMMENDED DEVELOPMENT LANGUAGE
+------------------------------------
+
+Host:
+
+Rust preferred.
+
+Use C/C++ where direct Linux graphics/media APIs or existing libraries make it more appropriate.
+
+Android:
+
+Kotlin preferred.
+
+Use Android SDK, MediaCodec, Surface, networking, lifecycle APIs.
+
+Avoid unnecessary third-party dependencies.
+
+66. MVP IMPLEMENTATION ORDER
+-----------------------------
+
+The most important development order discussed:
+
+1. Linux virtual display
+2. Linux frame capture
+3. H.264 encoding
+4. TCP transport
+5. Android H.264 decoding
+6. Android rendering
+7. connection management
+8. input
+9. security
+10. USB
+11. optimization
+
+Do not spend weeks building advanced networking before proving the core pipeline.
+
+67. FIRST MILESTONE — "HELLO MONITOR"
+-------------------------------------
+
+Required:
+
+1. Linux starts ORD.
+2. ORD exposes one virtual display.
+3. GNOME recognizes it.
+4. Android discovers host.
+5. Android connects.
+6. Host captures virtual display.
+7. Host encodes H.264.
+8. Host sends H.264 over TCP.
+9. Android MediaCodec decodes it.
+10. Android renders it.
+11. User sees Linux virtual desktop on tablet.
+
+No touch required initially.
+
+This validates the core architecture.
+
+68. SECOND MILESTONE
+--------------------
+
+Add:
+
+- touch
+- mouse
+- display configuration
+- orientation
+- reconnect
+- discovery improvements
+- diagnostics
+
+69. THIRD MILESTONE
+-------------------
+
+Add:
+
+- hardware encoder optimization
+- zero-copy/DMA-BUF path
+- USB transport
+- secure pairing
+- adaptive bitrate
+- multiple sessions
+
+70. FOURTH MILESTONE
+--------------------
+
+Polish:
+
+- GNOME integration
+- systemd
+- packaging
+- Android UI
+- battery optimization
+- performance tuning
+- documentation
+- release builds
+
+71. PERFORMANCE PRIORITY
+------------------------
+
+Optimization order:
+
+1. end-to-end latency
+2. smoothness
+3. decoder efficiency
+4. encoder efficiency
+5. network efficiency
+6. CPU usage
+7. battery usage
+8. compression efficiency
+
+72. DEBUGGING STRATEGY
+----------------------
+
+Isolate layers.
+
+Test 1:
+Can Linux create virtual display?
+
+Test 2:
+Can ORD capture it?
+
+Test 3:
+Can ORD encode it?
+
+Test 4:
+Can Android decode a prerecorded H.264 stream?
+
+Test 5:
+Can TCP transport deliver it?
+
+Test 6:
+Can Android render it?
+
+This prevents debugging the whole stack simultaneously.
+
+73. FINAL END-TO-END ARCHITECTURE
+---------------------------------
+
+LINUX:
+
+GNOME / Wayland
+    |
+    v
+Virtual Display Backend
+    |
+    v
+Frame Capture
+    |
+    v
+DMA-BUF / GPU
+    |
+    v
+H.264 Encoder
+    |
+    v
+ORD Protocol
+    |
+    v
+Transport
+
+ANDROID:
+
+Transport
+    |
+    v
+ORD Protocol
+    |
+    v
+H.264 Decoder / MediaCodec
+    |
+    v
+Surface
+    |
+    v
+Android GPU/compositor
+    |
+    v
+Tablet Display
+
+Input:
+
+Android Touch/Mouse/Keyboard
+    |
+    v
+ORD Protocol
+    |
+    v
+Linux Input Backend
+    |
+    v
+uinput / appropriate input API
+
+74. PRODUCT SUCCESS CRITERIA
+----------------------------
+
+The desired experience is:
+
+Linux laptop
+    |
+    v
+Start ORD
+    |
+    v
+GNOME detects "ORD Display"
+    |
+    v
+Open ORD on Samsung Galaxy Tab A9+
+    |
+    v
+Tap Linux laptop
+    |
+    v
+Connection established
+    |
+    v
+Tablet becomes secondary display
+    |
+    v
+Drag Firefox/terminal/editor onto tablet
+    |
+    v
+Tablet displays it smoothly
+    |
+    v
+Touch tablet interacts with Linux
+    |
+    v
+Disconnect
+    |
+    v
+Virtual display disappears cleanly
+
+That is the product.
+
+75. IMPORTANT ARCHITECTURAL DISTINCTION
+---------------------------------------
+
+ORD must not become merely:
+
+"screen sharing"
+
+The intended behavior is:
+
+"Linux treats Android as another monitor."
+
+spacedesk conceptually:
+
+Windows WDDM
+    |
+    v
+proprietary protocol
+    |
+    v
+Android
+
+ORD:
+
+Linux DRM/KMS / Wayland virtual display
+    |
+    v
+ORD protocol
+    |
+    v
+Android
+
+The internals can be completely different.
+
+76. OPEN-SOURCE CLEAN-ROOM POSITION
+-----------------------------------
+
+Do not:
+
+- decompile spacedesk
+- copy spacedesk code
+- extract proprietary protocol implementation
+- make ORD depend on spacedesk
+
+Do:
+
+- implement original protocol
+- use public Linux/Android APIs
+- use open-source projects as architectural references
+- check licenses before reuse
+- preserve third-party notices
+- maintain an independent implementation
+
+77. KEY TECHNICAL TAKEAWAY
+---------------------------
+
+The hardest part is the Linux virtual display.
+
+Once a genuine virtual monitor exists, the remaining pipeline is comparatively conventional:
+
+virtual display
+    ->
+capture
+    ->
+encode
+    ->
+transport
+    ->
+decode
+    ->
+render
+    ->
+input back to host
+
+The Android side can be implemented as a normal GMS-free APK using MediaCodec and Surface.
+
+78. CODING-AGENT INSTRUCTIONS
+-----------------------------
+
+The coding agent should:
+
+1. Read dump.txt completely before substantial implementation.
+2. Inspect actual Linux environment.
+3. Inspect Android development device where available.
+4. Research current Linux virtual display APIs and open-source implementations.
+5. Identify the most practical virtual-display backend for GNOME/Wayland.
+6. Create an implementation plan.
+7. Build the smallest end-to-end vertical slice.
+8. Test after each major layer.
+9. Document what is implemented versus experimental/planned.
+10. Prefer working code over theoretical design.
+11. Do not ask unnecessary questions if repository/environment information is enough.
+12. If blocked, document the blocker and implement the best fallback.
+13. Do not silently substitute screen sharing for a virtual monitor.
+14. Keep protocol/display/transport backends modular.
+
+79. CURRENT RECOMMENDED TECHNICAL DIRECTION
+-------------------------------------------
+
+Preferred overall direction:
+
+Linux:
+    Rust daemon
+    DRM/KMS or appropriate GNOME virtual display backend
+    DMA-BUF where possible
+    H.264
+    VA-API/NVENC/software fallback
+    TCP initially
+    uinput for input
+    systemd user service
+    diagnostics CLI
+
+Android:
+    Kotlin
+    min Android 10
+    target Android 16
+    MediaCodec
+    Surface
+    GMS-free
+    Wi-Fi/TCP initially
+    touch/input
+    tablet-first UI
+    Samsung Galaxy Tab A9+ optimization
+
+Future:
+    USB
+    QUIC/UDP
+    adaptive bitrate
+    multiple displays
+    multiple clients
+    additional codecs
+    zero-copy optimization
+    stronger pairing/security
+
+80. REFERENCE / RESEARCH NOTES
+------------------------------
+
+The conversation referenced public spacedesk documentation and Linux open-source projects to establish the architecture.
+
+Relevant ideas included:
+
+- spacedesk's official system requirements/documentation for host/client architecture.
+- spacedesk file list showing Windows service and driver components.
+- spacedesk documentation describing Android USB connection behavior.
+- spacedesk release notes mentioning H.264 encoder/hardware encoding changes.
+- Linux virtual-display work such as Hermes/KMS-style approaches.
+- Android MediaCodec documentation.
+- Linux uinput concepts.
+- Wayland/PipeWire/DMA-BUF concepts.
+
+These references should be rechecked against current upstream versions during implementation.
+
+Do not assume information from older documentation remains identical forever.
+
+81. WHAT ORD SHOULD ULTIMATELY BE
+---------------------------------
+
+ORD should be:
+
+- open source
+- Linux-native
+- Wayland-first
+- GNOME-optimized
+- Android-compatible
+- GMS-independent
+- low-latency
+- hardware-accelerated where possible
+- modular
+- secure
+- locally connected
+- capable of acting as a genuine secondary-display system
+
+It should feel like:
+
+"Connect my Android tablet and Linux gains another monitor."
+
+Not:
+
+"Open a remote desktop app."
+
+82. FINAL ONE-SENTENCE DESCRIPTION
+----------------------------------
+
+ORD (OpenRemoteDisplay) is an open-source Linux virtual-display and low-latency streaming system that makes an Android device function as a real secondary monitor over network or USB, with a Linux host daemon and an independent GMS-free Android client.
+
+END OF DUMP
+============
