@@ -24,14 +24,22 @@ class H264Decoder(
         if (isRunning.get()) return
 
         try {
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                // Low latency & real-time optimization for MediaCodec
-                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                setInteger(MediaFormat.KEY_PRIORITY, 0)
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                format.setInteger(MediaFormat.KEY_PRIORITY, 0)
             }
 
             codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
-                configure(format, surface, null, 0)
+                try {
+                    configure(format, surface, null, 0)
+                } catch (e: Exception) {
+                    // Fallback to basic format if low-latency/priority properties are rejected by the OEM decoder
+                    val fallbackFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+                    configure(fallbackFormat, surface, null, 0)
+                }
                 start()
             }
 
