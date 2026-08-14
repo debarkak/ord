@@ -81,6 +81,16 @@ impl InputBackend for MutterInputBackend {
                         &(self.stream_path.as_str(), slot, px_x, px_y),
                     )
                     .await;
+                // Also send pointer absolute position and left mouse click down for desktop apps & window dragging
+                let _: Result<(), _> = session_proxy
+                    .call(
+                        "NotifyPointerMotionAbsolute",
+                        &(self.stream_path.as_str(), px_x, px_y),
+                    )
+                    .await;
+                let _: Result<(), _> = session_proxy
+                    .call("NotifyPointerButton", &(0x110i32, true))
+                    .await;
             }
             InputEventType::TouchMove => {
                 let slot = event.slot as u32;
@@ -90,10 +100,19 @@ impl InputBackend for MutterInputBackend {
                         &(self.stream_path.as_str(), slot, px_x, px_y),
                     )
                     .await;
+                let _: Result<(), _> = session_proxy
+                    .call(
+                        "NotifyPointerMotionAbsolute",
+                        &(self.stream_path.as_str(), px_x, px_y),
+                    )
+                    .await;
             }
             InputEventType::TouchUp | InputEventType::TouchCancel => {
                 let slot = event.slot as u32;
                 let _: Result<(), _> = session_proxy.call("NotifyTouchUp", &(slot,)).await;
+                let _: Result<(), _> = session_proxy
+                    .call("NotifyPointerButton", &(0x110i32, false))
+                    .await;
             }
             InputEventType::PointerMotionAbsolute => {
                 let _: Result<(), _> = session_proxy
@@ -104,7 +123,13 @@ impl InputBackend for MutterInputBackend {
                     .await;
             }
             InputEventType::PointerButton => {
-                let button = event.code_or_btn as i32; // 1 = Left, 2 = Middle, 3 = Right
+                // Map button 1 -> BTN_LEFT (0x110 = 272), 2 -> BTN_MIDDLE (0x112 = 274), 3 -> BTN_RIGHT (0x111 = 273)
+                let button = match event.code_or_btn {
+                    1 => 0x110i32,
+                    2 => 0x112i32,
+                    3 => 0x111i32,
+                    other => other as i32,
+                };
                 let pressed = event.state_or_flags != 0;
                 let _: Result<(), _> = session_proxy
                     .call("NotifyPointerButton", &(button, pressed))

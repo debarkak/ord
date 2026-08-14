@@ -49,8 +49,11 @@ impl HostDaemon {
 
         let handler = Arc::new(SessionHandler::new(self.config.clone(), self.force_test_pattern));
 
+        let session_lock = Arc::new(tokio::sync::Mutex::new(()));
+
         // 3. Spawn background USB AOAP Device Watcher
         let usb_handler = Arc::clone(&handler);
+        let usb_lock = Arc::clone(&session_lock);
         tokio::spawn(async move {
             let mut active_usb = false;
             loop {
@@ -66,7 +69,9 @@ impl HostDaemon {
                                             let h = Arc::clone(&usb_handler);
                                             let stream_arc = Arc::new(stream);
                                             let s_clone = Arc::clone(&stream_arc);
+                                            let lock_clone = Arc::clone(&usb_lock);
                                             tokio::spawn(async move {
+                                                let _guard = lock_clone.lock().await;
                                                 if let Err(e) = h.handle_usb_client(s_clone).await {
                                                     error!("USB AOAP session error: {:?}", e);
                                                 }
@@ -93,9 +98,14 @@ impl HostDaemon {
                         Ok((stream, addr)) => {
                             info!("Incoming connection from {}", addr);
                             let handler_clone = Arc::clone(&handler);
+                            let lock_clone = Arc::clone(&session_lock);
                             tokio::spawn(async move {
-                                if let Err(e) = handler_clone.handle_client(stream).await {
-                                    error!("Session error with {}: {:?}", addr, e);
+                                if let Ok(_guard) = lock_clone.try_lock() {
+                                    if let Err(e) = handler_clone.handle_client(stream).await {
+                                        error!("Session error with {}: {:?}", addr, e);
+                                    }
+                                } else {
+                                    warn!("Rejecting connection from {}: another session (USB/TCP) is already active", addr);
                                 }
                             });
                         }
