@@ -49,15 +49,14 @@ impl HostDaemon {
 
         let handler = Arc::new(SessionHandler::new(self.config.clone(), self.force_test_pattern));
 
-        let session_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let is_session_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // 3. Spawn background USB AOAP Device Watcher
         let usb_handler = Arc::clone(&handler);
-        let usb_lock = Arc::clone(&session_lock);
+        let usb_active = Arc::clone(&is_session_active);
         tokio::spawn(async move {
-            let mut active_usb = false;
             loop {
-                if !active_usb {
+                if !usb_active.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Ok(context) = rusb::Context::new() {
                         if let Ok(devices) = context.devices() {
                             for device in devices.iter() {
@@ -65,16 +64,16 @@ impl HostDaemon {
                                     if crate::transport::usb::UsbAoapManager::is_accessory_device(&desc) {
                                         info!("Found Android device in USB AOA mode (0x{:04x}:0x{:04x})", desc.vendor_id(), desc.product_id());
                                         if let Ok(stream) = crate::transport::usb::UsbAoapManager::open_accessory(&device) {
-                                            active_usb = true;
+                                            usb_active.store(true, std::sync::atomic::Ordering::Relaxed);
                                             let h = Arc::clone(&usb_handler);
                                             let stream_arc = Arc::new(stream);
                                             let s_clone = Arc::clone(&stream_arc);
-                                            let lock_clone = Arc::clone(&usb_lock);
+                                            let active_flag = Arc::clone(&usb_active);
                                             tokio::spawn(async move {
-                                                let _guard = lock_clone.lock().await;
                                                 if let Err(e) = h.handle_usb_client(s_clone).await {
-                                                    error!("USB AOAP session error: {:?}", e);
+                                                    error!("USB AOAP session ended: {:?}", e);
                                                 }
+                                                active_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                                             });
                                             break;
                                         }
@@ -87,7 +86,7 @@ impl HostDaemon {
                         }
                     }
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
             }
         });
 
@@ -96,17 +95,19 @@ impl HostDaemon {
                 accept_res = listener.accept() => {
                     match accept_res {
                         Ok((stream, addr)) => {
+                            if is_session_active.load(std::sync::atomic::Ordering::Relaxed) {
+                                warn!("Rejecting TCP connection from {}: a session is already active", addr);
+                                continue;
+                            }
+                            is_session_active.store(true, std::sync::atomic::Ordering::Relaxed);
                             info!("Incoming connection from {}", addr);
                             let handler_clone = Arc::clone(&handler);
-                            let lock_clone = Arc::clone(&session_lock);
+                            let active_flag = Arc::clone(&is_session_active);
                             tokio::spawn(async move {
-                                if let Ok(_guard) = lock_clone.try_lock() {
-                                    if let Err(e) = handler_clone.handle_client(stream).await {
-                                        error!("Session error with {}: {:?}", addr, e);
-                                    }
-                                } else {
-                                    warn!("Rejecting connection from {}: another session (USB/TCP) is already active", addr);
+                                if let Err(e) = handler_clone.handle_client(stream).await {
+                                    error!("Session error with {}: {:?}", addr, e);
                                 }
+                                active_flag.store(false, std::sync::atomic::Ordering::Relaxed);
                             });
                         }
                         Err(e) => {
