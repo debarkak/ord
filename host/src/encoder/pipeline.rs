@@ -119,7 +119,7 @@ impl VideoPipeline {
 
     fn build_pipeline_string(pipewire_node_id: u32, config: &EncoderConfig) -> Result<String> {
         let source_str = if pipewire_node_id > 0 {
-            format!("pipewiresrc path={} do-timestamp=true keep-fd=false", pipewire_node_id)
+            format!("pipewiresrc path={} do-timestamp=true", pipewire_node_id)
         } else {
             format!(
                 "videotestsrc is-live=true pattern=smpte ! video/x-raw,width={},height={},framerate={}/1",

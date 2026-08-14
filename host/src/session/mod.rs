@@ -56,31 +56,20 @@ impl SessionHandler {
         let mut display_backend: Box<dyn DisplayBackend> = if self.force_test_pattern {
             Box::new(TestSourceDisplayBackend::new())
         } else {
-            // Try Mutter backend first, fallback to TestSource if running outside GNOME
-            match MutterDisplayBackend::new().create_virtual_display(width, height, fps).await {
-                Ok(info) => {
-                    info!("Successfully created GNOME Mutter Virtual Display: {:?}", info);
-                    // Wrap existing backend
-                    struct ActiveMutter(MutterDisplayBackend, VirtualDisplayInfo);
-                    #[async_trait::async_trait]
-                    impl DisplayBackend for ActiveMutter {
-                        async fn create_virtual_display(&mut self, _: u32, _: u32, _: u32) -> Result<VirtualDisplayInfo> {
-                            Ok(self.1.clone())
-                        }
-                        async fn destroy_virtual_display(&mut self) -> Result<()> {
-                            self.0.destroy_virtual_display().await
-                        }
-                    }
-                    Box::new(ActiveMutter(MutterDisplayBackend::new(), info))
-                }
-                Err(e) => {
-                    warn!("Failed to create Mutter virtual display ({}). Falling back to test pattern source.", e);
-                    Box::new(TestSourceDisplayBackend::new())
-                }
-            }
+            Box::new(MutterDisplayBackend::new())
         };
 
-        let display_info = display_backend.create_virtual_display(width, height, fps).await?;
+        let display_info = match display_backend.create_virtual_display(width, height, fps).await {
+            Ok(info) => {
+                info!("Successfully created GNOME Mutter Virtual Display: {:?}", info);
+                info
+            }
+            Err(e) => {
+                warn!("Failed to create Mutter virtual display ({}). Falling back to test pattern source.", e);
+                display_backend = Box::new(TestSourceDisplayBackend::new());
+                display_backend.create_virtual_display(width, height, fps).await?
+            }
+        };
 
         // 3. Send HELLO_ACK
         let host_name = hostname::get()
