@@ -49,6 +49,10 @@ class DiscoveryFragment : Fragment() {
             adapter = hostAdapter
         }
 
+        binding.btnUsbConnect.setOnClickListener {
+            (activity as? MainActivity)?.navigateTo(DisplayFragment.newUsbInstance())
+        }
+
         binding.btnManualConnect.setOnClickListener {
             showManualConnectDialog()
         }

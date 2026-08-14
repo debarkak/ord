@@ -19,17 +19,24 @@ import org.ord.client.protocol.*
 import org.ord.client.transport.TcpClient
 import org.ord.client.util.PreferencesHelper
 
+import android.hardware.usb.UsbAccessory
+import android.hardware.usb.UsbManager
+import androidx.appcompat.app.AppCompatActivity
+import org.ord.client.transport.OrdTransport
+import org.ord.client.transport.UsbAccessoryTransport
+
 class DisplayFragment : Fragment(), SurfaceHolder.Callback {
 
     private var _binding: FragmentDisplayBinding? = null
     private val binding get() = _binding!!
 
+    private var isUsb: Boolean = false
     private var hostIp: String = ""
     private var hostPort: Int = 9090
 
-    private var tcpClient: TcpClient? = null
+    private var activeTransport: OrdTransport? = null
     private var decoder: H264Decoder? = null
-    private val frameBuffer = FrameRingBuffer(maxCapacity = 3)
+    private val frameBuffer = FrameRingBuffer(maxCapacity = 2)
     private var touchHandler: TouchInputHandler? = null
 
     private var sessionJob: Job? = null
@@ -37,14 +44,24 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
     private lateinit var prefs: PreferencesHelper
 
     companion object {
+        private const val ARG_IS_USB = "arg_is_usb"
         private const val ARG_IP = "arg_ip"
         private const val ARG_PORT = "arg_port"
 
         fun newInstance(ip: String, port: Int): DisplayFragment {
             return DisplayFragment().apply {
                 arguments = Bundle().apply {
+                    putBoolean(ARG_IS_USB, false)
                     putString(ARG_IP, ip)
                     putInt(ARG_PORT, port)
+                }
+            }
+        }
+
+        fun newUsbInstance(): DisplayFragment {
+            return DisplayFragment().apply {
+                arguments = Bundle().apply {
+                    putBoolean(ARG_IS_USB, true)
                 }
             }
         }
@@ -52,6 +69,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        isUsb = arguments?.getBoolean(ARG_IS_USB, false) ?: false
         hostIp = arguments?.getString(ARG_IP) ?: ""
         hostPort = arguments?.getInt(ARG_PORT) ?: 9090
     }
@@ -117,15 +135,28 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
 
     private fun startDisplaySession(surface: Surface) {
         sessionJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-            val client = TcpClient(hostIp, hostPort)
-            tcpClient = client
-
             try {
-                withContext(Dispatchers.Main) {
-                    binding.tvDisplayStatus.text = "Connecting to $hostIp:$hostPort..."
+                val transport: OrdTransport = if (isUsb) {
+                    withContext(Dispatchers.Main) {
+                        binding.tvDisplayStatus.text = "Connecting via USB AOAP..."
+                    }
+                    val usbManager = requireContext().getSystemService(AppCompatActivity.USB_SERVICE) as UsbManager
+                    val accessory = usbManager.accessoryList?.firstOrNull()
+                        ?: throw IllegalStateException("No USB Accessory attached")
+                    val usbTransport = UsbAccessoryTransport(usbManager, accessory)
+                    if (!usbTransport.open()) {
+                        throw IllegalStateException("Failed to open USB Accessory")
+                    }
+                    usbTransport
+                } else {
+                    withContext(Dispatchers.Main) {
+                        binding.tvDisplayStatus.text = "Connecting to $hostIp:$hostPort..."
+                    }
+                    val client = TcpClient(hostIp, hostPort)
+                    client.connect(5000)
+                    client
                 }
-
-                client.connect(5000)
+                activeTransport = transport
 
                 // Handshake: Send HELLO
                 val displayMetrics = resources.displayMetrics
@@ -142,7 +173,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                     supportedCodecs = listOf("h264")
                 )
 
-                client.sendRaw(
+                transport.sendRaw(
                     msgType = OrdConstants.MSG_HELLO,
                     flags = 0,
                     sequence = 0,
@@ -150,7 +181,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                 )
 
                 // Await HELLO_ACK
-                val ackPacket = client.readPacket()
+                val ackPacket = transport.readPacket()
                 if (ackPacket.header.msgType != OrdConstants.MSG_HELLO_ACK) {
                     throw IllegalStateException("Expected HELLO_ACK, got ${ackPacket.header.msgType}")
                 }
@@ -162,7 +193,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                 dec.start(viewLifecycleOwner.lifecycleScope)
 
                 // Initialize Input
-                touchHandler = TouchInputHandler(client, viewLifecycleOwner.lifecycleScope)
+                touchHandler = TouchInputHandler(transport, viewLifecycleOwner.lifecycleScope)
                 withContext(Dispatchers.Main) {
                     binding.surfaceView.setOnTouchListener(touchHandler)
                     binding.llConnectingState.visibility = View.GONE
@@ -170,7 +201,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
 
                 // Packet Read Loop
                 while (isActive) {
-                    val packet = client.readPacket()
+                    val packet = transport.readPacket()
                     when (packet.header.msgType) {
                         OrdConstants.MSG_VIDEO_DATA -> {
                             val frame = EncodedVideoFrame(
@@ -188,7 +219,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                             }
                         }
                         OrdConstants.MSG_PING -> {
-                            client.sendRaw(
+                            transport.sendRaw(
                                 msgType = OrdConstants.MSG_PONG,
                                 flags = 0,
                                 sequence = packet.header.sequence,
@@ -215,8 +246,8 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
         sessionJob = null
         decoder?.stop()
         decoder = null
-        tcpClient?.close()
-        tcpClient = null
+        activeTransport?.close()
+        activeTransport = null
     }
 
     private fun disconnectAndExit() {

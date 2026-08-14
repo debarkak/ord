@@ -8,10 +8,10 @@ import kotlinx.coroutines.launch
 import org.ord.client.protocol.InputEvent
 import org.ord.client.protocol.InputEventType
 import org.ord.client.protocol.OrdConstants
-import org.ord.client.transport.TcpClient
+import org.ord.client.transport.OrdTransport
 
 class TouchInputHandler(
-    private val client: TcpClient,
+    private val transport: OrdTransport,
     private val scope: CoroutineScope
 ) : View.OnTouchListener {
 
@@ -93,7 +93,7 @@ class TouchInputHandler(
     private fun sendInput(event: InputEvent) {
         scope.launch(Dispatchers.IO) {
             try {
-                client.sendRaw(
+                transport.sendRaw(
                     msgType = OrdConstants.MSG_INPUT_EVENT,
                     flags = 0,
                     sequence = 0,

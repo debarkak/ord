@@ -1,38 +1,40 @@
 package org.ord.client.transport
 
-import kotlinx.coroutines.*
+import android.hardware.usb.UsbAccessory
+import android.hardware.usb.UsbManager
+import android.os.ParcelFileDescriptor
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.ord.client.protocol.OrdHeader
 import org.ord.client.protocol.OrdPacket
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.net.InetSocketAddress
-import java.net.Socket
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-class TcpClient(
-    private val host: String,
-    private val port: Int
+class UsbAccessoryTransport(
+    private val usbManager: UsbManager,
+    private val accessory: UsbAccessory
 ) : OrdTransport {
-    private var socket: Socket? = null
+    private var fileDescriptor: ParcelFileDescriptor? = null
     private var inputStream: DataInputStream? = null
     private var outputStream: DataOutputStream? = null
 
-    suspend fun connect(timeoutMs: Int = 5000) = withContext(Dispatchers.IO) {
-        val s = Socket()
-        s.tcpNoDelay = true
-        s.receiveBufferSize = 256 * 1024
-        s.sendBufferSize = 64 * 1024
-        s.connect(InetSocketAddress(host, port), timeoutMs)
-        socket = s
-        inputStream = DataInputStream(BufferedInputStream(s.getInputStream()))
-        outputStream = DataOutputStream(BufferedOutputStream(s.getOutputStream()))
+    suspend fun open(): Boolean = withContext(Dispatchers.IO) {
+        val pfd = usbManager.openAccessory(accessory) ?: return@withContext false
+        fileDescriptor = pfd
+        val fd = pfd.fileDescriptor
+        inputStream = DataInputStream(BufferedInputStream(FileInputStream(fd), 256 * 1024))
+        outputStream = DataOutputStream(BufferedOutputStream(FileOutputStream(fd), 64 * 1024))
+        true
     }
 
     override suspend fun readPacket(): OrdPacket = withContext(Dispatchers.IO) {
-        val stream = inputStream ?: throw IllegalStateException("Socket not connected")
+        val stream = inputStream ?: throw IllegalStateException("USB Accessory stream not open")
 
         val headerBytes = ByteArray(OrdPacket.HEADER_SIZE)
         stream.readFully(headerBytes)
@@ -41,7 +43,7 @@ class TcpClient(
         val magic = ByteArray(4)
         headerBuf.get(magic)
         if (!magic.contentEquals(OrdPacket.MAGIC)) {
-            throw IllegalArgumentException("Invalid magic header received")
+            throw IllegalArgumentException("Invalid magic header received over USB")
         }
 
         val version = headerBuf.get()
@@ -64,14 +66,14 @@ class TcpClient(
     }
 
     override suspend fun sendPacket(packet: OrdPacket) = withContext(Dispatchers.IO) {
-        val stream = outputStream ?: throw IllegalStateException("Socket not connected")
+        val stream = outputStream ?: throw IllegalStateException("USB Accessory stream not open")
         val encoded = packet.encode()
         stream.write(encoded)
         stream.flush()
     }
 
     override suspend fun sendRaw(msgType: Byte, flags: Short, sequence: Int, payload: ByteArray) = withContext(Dispatchers.IO) {
-        val stream = outputStream ?: throw IllegalStateException("Socket not connected")
+        val stream = outputStream ?: throw IllegalStateException("USB Accessory stream not open")
         val header = OrdHeader(OrdPacket.PROTOCOL_VERSION, msgType, flags, sequence, payload.size)
         val packet = OrdPacket(header, payload)
         stream.write(packet.encode())
@@ -80,12 +82,16 @@ class TcpClient(
 
     override fun close() {
         try {
-            socket?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        socket = null
+            inputStream?.close()
+        } catch (_: Exception) {}
+        try {
+            outputStream?.close()
+        } catch (_: Exception) {}
+        try {
+            fileDescriptor?.close()
+        } catch (_: Exception) {}
         inputStream = null
         outputStream = null
+        fileDescriptor = null
     }
 }

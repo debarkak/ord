@@ -138,23 +138,23 @@ impl VideoPipeline {
         };
 
         let encoder_str = if use_vaapi && ElementFactory::find("vah264enc").is_some() {
-            info!("Using VA-API Hardware H.264 Encoder (vah264enc)");
-            format!("videoconvert ! videoscale ! vah264enc bitrate={}", config.bitrate_kbps)
+            info!("Using VA-API Hardware H.264 Encoder (vah264enc) with zero-latency parameters");
+            format!("videoconvert ! vah264enc bitrate={} rate-control=cbr key-int-max=30", config.bitrate_kbps)
         } else if ElementFactory::find("x264enc").is_some() {
             info!("Using Software x264 Encoder (x264enc) with zerolatency tune");
             format!(
-                "videoconvert ! videoscale ! x264enc tune=zerolatency speed-preset=ultrafast bitrate={} key-int-max={}",
-                config.bitrate_kbps, config.keyframe_interval_frames
+                "videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast bitrate={} key-int-max=30 bframes=0 sliced-threads=true",
+                config.bitrate_kbps
             )
         } else if ElementFactory::find("openh264enc").is_some() {
             info!("Using OpenH264 Encoder (openh264enc)");
-            format!("videoconvert ! videoscale ! openh264enc bitrate={}", config.bitrate_kbps * 1000)
+            format!("videoconvert ! openh264enc bitrate={} gop-size=30", config.bitrate_kbps * 1000)
         } else {
             return Err(anyhow!("No compatible H.264 encoder found on system"));
         };
 
         let pipeline_str = format!(
-            "{} ! {} ! h264parse config-interval=-1 ! appsink name=ord_sink emit-signals=true max-buffers=2 drop=true sync=false",
+            "{} ! {} ! h264parse config-interval=-1 ! appsink name=ord_sink emit-signals=true max-buffers=1 drop=true sync=false",
             source_str, encoder_str
         );
 

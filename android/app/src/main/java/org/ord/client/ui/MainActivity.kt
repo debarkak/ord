@@ -6,6 +6,10 @@ import androidx.fragment.app.Fragment
 import org.ord.client.R
 import org.ord.client.databinding.ActivityMainBinding
 
+import android.content.Intent
+import android.hardware.usb.UsbAccessory
+import android.hardware.usb.UsbManager
+
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
@@ -16,6 +20,25 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         if (savedInstanceState == null) {
+            handleIntent(intent)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        val accessory = intent?.getParcelableExtra<UsbAccessory>(UsbManager.EXTRA_ACCESSORY)
+            ?: (getSystemService(USB_SERVICE) as UsbManager).accessoryList?.firstOrNull()
+
+        if (accessory != null) {
+            supportFragmentManager.beginTransaction()
+                .replace(R.id.fragment_container, DisplayFragment.newUsbInstance())
+                .commit()
+        } else if (supportFragmentManager.findFragmentById(R.id.fragment_container) == null) {
             supportFragmentManager.beginTransaction()
                 .replace(R.id.fragment_container, DiscoveryFragment())
                 .commit()

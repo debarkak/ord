@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <usb-accessory
+        manufacturer="ORD"
+        model="OpenRemoteDisplay"
+        version="1.0.0" />
+</resources>

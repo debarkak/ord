@@ -24,8 +24,17 @@ class H264Decoder(
         if (isRunning.get()) return
 
         try {
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-            
+            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                    setInteger(MediaFormat.KEY_PRIORITY, 0)
+                    setInteger(MediaFormat.KEY_OPERATING_RATE, 120)
+                }
+            }
+
             var mediaCodec: MediaCodec? = null
             try {
                 val c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
@@ -39,30 +48,14 @@ class H264Decoder(
 
             if (mediaCodec == null) {
                 try {
+                    val basicFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
                     val c = MediaCodec.createByCodecName("c2.android.avc.decoder")
-                    c.configure(format, surface, null, 0)
+                    c.configure(basicFormat, surface, null, 0)
                     c.start()
                     mediaCodec = c
                 } catch (e: Exception) {
                     mediaCodec?.release()
                     mediaCodec = null
-                }
-            }
-
-            if (mediaCodec == null) {
-                val codecList = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
-                for (info in codecList.codecInfos) {
-                    if (!info.isEncoder && info.supportedTypes.contains(MediaFormat.MIMETYPE_VIDEO_AVC)) {
-                        try {
-                            val c = MediaCodec.createByCodecName(info.name)
-                            c.configure(format, surface, null, 0)
-                            c.start()
-                            mediaCodec = c
-                            break
-                        } catch (e: Exception) {
-                            // continue trying
-                        }
-                    }
                 }
             }
 
@@ -73,25 +66,40 @@ class H264Decoder(
                 val bufferInfo = MediaCodec.BufferInfo()
 
                 while (isRunning.get() && isActive) {
-                    val mediaCodec = codec ?: break
+                    val activeCodec = codec ?: break
+                    var hadActivity = false
 
-                    // 1. Feed input buffer from frame ring-buffer
+                    // 1. Drain available output buffers to Surface with minimal latency
+                    try {
+                        var outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
+                        while (outIndex >= 0) {
+                            activeCodec.releaseOutputBuffer(outIndex, true)
+                            decodedFramesCount.incrementAndGet()
+                            hadActivity = true
+                            outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
+                        }
+                    } catch (e: Exception) {
+                        if (!isRunning.get()) break
+                    }
+
+                    // 2. Feed pending input frame
                     val frame = frameBuffer.poll()
                     if (frame != null) {
                         try {
-                            val inIndex = mediaCodec.dequeueInputBuffer(10_000) // 10ms timeout
+                            val inIndex = activeCodec.dequeueInputBuffer(1_000) // 1ms max
                             if (inIndex >= 0) {
-                                val inputBuffer = mediaCodec.getInputBuffer(inIndex)
+                                val inputBuffer = activeCodec.getInputBuffer(inIndex)
                                 if (inputBuffer != null) {
                                     inputBuffer.clear()
                                     inputBuffer.put(frame.data)
-                                    mediaCodec.queueInputBuffer(
+                                    activeCodec.queueInputBuffer(
                                         inIndex,
                                         0,
                                         frame.data.size,
                                         frame.timestampUs,
                                         0
                                     )
+                                    hadActivity = true
                                 }
                             } else {
                                 droppedFramesCount.incrementAndGet()
@@ -101,22 +109,8 @@ class H264Decoder(
                         }
                     }
 
-                    // 2. Drain decoded output buffers to Surface
-                    try {
-                        var outIndex = mediaCodec.dequeueOutputBuffer(bufferInfo, 0)
-                        while (outIndex >= 0) {
-                            // Render directly to Surface with true
-                            mediaCodec.releaseOutputBuffer(outIndex, true)
-                            decodedFramesCount.incrementAndGet()
-                            outIndex = mediaCodec.dequeueOutputBuffer(bufferInfo, 0)
-                        }
-                    } catch (e: Exception) {
-                        if (!isRunning.get()) break
-                    }
-
-                    if (frame == null) {
-                        // Yield CPU when queue is empty
-                        delay(2)
+                    if (!hadActivity) {
+                        delay(1)
                     }
                 }
             }

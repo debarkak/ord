@@ -141,6 +141,194 @@ impl SessionHandler {
         session_result
     }
 
+    pub async fn handle_usb_client(&self, stream: std::sync::Arc<crate::transport::usb::UsbAccessoryStream>) -> Result<()> {
+        info!("Starting USB AOAP session handler...");
+        let (usb_in_tx, mut usb_in_rx) = mpsc::channel::<OrdPacket>(64);
+        let (usb_out_tx, mut usb_out_rx) = mpsc::channel::<Vec<u8>>(128);
+
+        // USB Read Worker Thread
+        let read_stream = stream.clone();
+        let read_task = tokio::task::spawn_blocking(move || {
+            let mut buf = vec![0u8; 65536];
+            let mut accumulator = Vec::with_capacity(131072);
+            loop {
+                match read_stream.read_packet_sync(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        accumulator.extend_from_slice(&buf[..n]);
+                        while accumulator.len() >= 8 {
+                            let payload_len = u32::from_be_bytes([accumulator[4], accumulator[5], accumulator[6], accumulator[7]]) as usize;
+                            let total_len = 8 + payload_len;
+                            if accumulator.len() >= total_len {
+                                let packet_bytes = accumulator.drain(..total_len).collect::<Vec<u8>>();
+                                if let Ok(packet) = OrdPacket::decode(&packet_bytes) {
+                                    if usb_in_tx.blocking_send(packet).is_err() {
+                                        return;
+                                    }
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+
+        // USB Write Worker Thread
+        let write_stream = stream.clone();
+        let write_task = tokio::task::spawn_blocking(move || {
+            while let Some(data) = usb_out_rx.blocking_recv() {
+                if write_stream.write_packet_sync(&data).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // 1. Handshake: Wait for HELLO
+        let hello_packet = usb_in_rx.recv().await.ok_or_else(|| anyhow!("USB connection closed before HELLO"))?;
+        if hello_packet.header.msg_type != MSG_HELLO {
+            return Err(anyhow!("Expected MSG_HELLO, got {}", hello_packet.header.msg_type));
+        }
+
+        let hello: HelloMessage = serde_json::from_slice(&hello_packet.payload)
+            .context("Failed to deserialize HelloMessage")?;
+
+        info!(
+            "USB Client connected: '{}' (v{}) Screen: {}x{} @ {}fps, DPI: {}",
+            hello.client_name, hello.client_version, hello.screen_width, hello.screen_height, hello.max_fps, hello.density_dpi
+        );
+
+        let width = if hello.screen_width > 0 { hello.screen_width } else { self.config.display.default_width };
+        let height = if hello.screen_height > 0 { hello.screen_height } else { self.config.display.default_height };
+        let fps = if hello.max_fps > 0 { hello.max_fps.min(120) } else { self.config.display.default_fps };
+
+        // 2. Initialize Display Backend
+        let mut display_backend: Box<dyn DisplayBackend> = if self.force_test_pattern {
+            Box::new(TestSourceDisplayBackend::new())
+        } else {
+            Box::new(MutterDisplayBackend::new())
+        };
+
+        let display_info = match display_backend.create_virtual_display(width, height, fps).await {
+            Ok(info) => {
+                info!("Successfully created GNOME Mutter Virtual Display: {:?}", info);
+                info
+            }
+            Err(e) => {
+                warn!("Failed to create Mutter virtual display ({}). Falling back to test pattern source.", e);
+                display_backend = Box::new(TestSourceDisplayBackend::new());
+                display_backend.create_virtual_display(width, height, fps).await?
+            }
+        };
+
+        // 3. Send HELLO_ACK
+        let host_name = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "ORD-Host".to_string());
+
+        let hello_ack = HelloAckMessage {
+            server_name: host_name,
+            server_version: "1.0.0".to_string(),
+            session_id: format!("ord-usb-{}", std::process::id()),
+            width: display_info.width,
+            height: display_info.height,
+            fps: display_info.fps,
+            selected_codec: "h264".to_string(),
+            auth_required: false,
+        };
+
+        let ack_packet = OrdPacket::new(MSG_HELLO_ACK, 0, 0, serde_json::to_vec(&hello_ack)?);
+        let _ = usb_out_tx.send(ack_packet.encode()).await;
+
+        // 4. Send DISPLAY_CONFIG
+        let display_config = DisplayConfigMessage {
+            width: display_info.width,
+            height: display_info.height,
+            refresh_rate: display_info.fps,
+            orientation: 0,
+            scale_factor: self.config.display.scale_factor,
+        };
+        let cfg_packet = OrdPacket::new(MSG_DISPLAY_CONFIG, 0, 1, serde_json::to_vec(&display_config)?);
+        let _ = usb_out_tx.send(cfg_packet.encode()).await;
+
+        // 5. Initialize Input Backend
+        let mut input_backend: Box<dyn InputBackend> = if display_info.pipewire_node_id > 0 && !display_info.stream_path.is_empty() {
+            match MutterInputBackend::new(&display_info.stream_path, display_info.width, display_info.height).await {
+                Ok(backend) => Box::new(backend),
+                Err(e) => {
+                    warn!("Failed to initialize Mutter RemoteDesktop input: {}. Using uinput fallback.", e);
+                    Box::new(UInputBackend::new())
+                }
+            }
+        } else {
+            Box::new(UInputBackend::new())
+        };
+
+        // 6. Start Video Encoder Pipeline
+        let (frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(30);
+        let encoder_config = EncoderConfig {
+            width: display_info.width,
+            height: display_info.height,
+            fps: display_info.fps,
+            bitrate_kbps: self.config.stream.bitrate_kbps,
+            encoder_choice: self.config.stream.encoder.clone(),
+            keyframe_interval_frames: self.config.stream.keyframe_interval_frames,
+        };
+
+        let pipeline = VideoPipeline::new(display_info.pipewire_node_id, &encoder_config, frame_tx)?;
+        pipeline.start()?;
+
+        info!("Display and video streaming session established over USB AOAP");
+
+        let mut frame_seq: u32 = 0;
+        loop {
+            tokio::select! {
+                Some(frame) = frame_rx.recv() => {
+                    frame_seq = frame_seq.wrapping_add(1);
+                    let mut flags = 0u16;
+                    if frame.is_keyframe {
+                        flags |= FLAG_KEYFRAME;
+                    }
+                    flags |= FLAG_END_OF_FRAME;
+
+                    let packet = OrdPacket::new(MSG_VIDEO_DATA, flags, frame_seq, frame.data);
+                    if usb_out_tx.send(packet.encode()).await.is_err() {
+                        break;
+                    }
+                }
+                Some(packet) = usb_in_rx.recv() => {
+                    match packet.header.msg_type {
+                        MSG_INPUT_EVENT => {
+                            if let Some(event) = InputEvent::decode(&packet.payload) {
+                                let _ = input_backend.handle_event(&event).await;
+                            }
+                        }
+                        MSG_PING => {
+                            let pong = OrdPacket::new(MSG_PONG, 0, packet.header.sequence, packet.payload);
+                            let _ = usb_out_tx.send(pong.encode()).await;
+                        }
+                        MSG_DISCONNECT => {
+                            info!("Client sent disconnect request");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                else => break,
+            }
+        }
+
+        info!("Closing USB AOAP session, cleaning up display...");
+        stream.close();
+        let _ = pipeline.stop();
+        let _ = display_backend.destroy_virtual_display().await;
+        let _ = read_task.await;
+        let _ = write_task.await;
+
+        Ok(())
+    }
+
     async fn run_session_loop(
         framed: &mut FramedStream,
         frame_rx: &mut mpsc::Receiver<VideoFrame>,

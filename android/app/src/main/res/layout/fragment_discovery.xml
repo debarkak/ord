@@ -38,6 +38,16 @@
         app:layout_constraintTop_toTopOf="parent">
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_usb_connect"
+            style="@style/Widget.MaterialComponents.Button.UnelevatedButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="12dp"
+            android:text="USB Connect"
+            android:backgroundTint="@color/primary_accent"
+            android:textColor="@color/bg_dark" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_manual_connect"
             style="@style/Widget.MaterialComponents.Button.OutlinedButton"
             android:layout_width="wrap_content"

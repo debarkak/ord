@@ -3,6 +3,7 @@ use crate::session::SessionHandler;
 use crate::transport::discovery::DiscoveryBroadcaster;
 use crate::transport::tcp::TcpTransportServer;
 use anyhow::Result;
+use rusb::UsbContext;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -44,9 +45,46 @@ impl HostDaemon {
         );
         let listener = tcp_server.bind().await?;
 
-        info!("ORD Host Ready! Waiting for Android client connection on port {}...", self.config.server.port);
+        info!("ORD Host Ready! Waiting for Android client connection on port {} or USB AOAP...", self.config.server.port);
 
         let handler = Arc::new(SessionHandler::new(self.config.clone(), self.force_test_pattern));
+
+        // 3. Spawn background USB AOAP Device Watcher
+        let usb_handler = Arc::clone(&handler);
+        tokio::spawn(async move {
+            let mut active_usb = false;
+            loop {
+                if !active_usb {
+                    if let Ok(context) = rusb::Context::new() {
+                        if let Ok(devices) = context.devices() {
+                            for device in devices.iter() {
+                                if let Ok(desc) = device.device_descriptor() {
+                                    if crate::transport::usb::UsbAoapManager::is_accessory_device(&desc) {
+                                        info!("Found Android device in USB AOA mode (0x{:04x}:0x{:04x})", desc.vendor_id(), desc.product_id());
+                                        if let Ok(stream) = crate::transport::usb::UsbAoapManager::open_accessory(&device) {
+                                            active_usb = true;
+                                            let h = Arc::clone(&usb_handler);
+                                            let stream_arc = Arc::new(stream);
+                                            let s_clone = Arc::clone(&stream_arc);
+                                            tokio::spawn(async move {
+                                                if let Err(e) = h.handle_usb_client(s_clone).await {
+                                                    error!("USB AOAP session error: {:?}", e);
+                                                }
+                                            });
+                                            break;
+                                        }
+                                    } else {
+                                        // Try switching Android devices to AOA mode
+                                        let _ = crate::transport::usb::UsbAoapManager::switch_to_accessory(&device);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+            }
+        });
 
         loop {
             tokio::select! {
