@@ -7,10 +7,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.ord.client.protocol.OrdHeader
 import org.ord.client.protocol.OrdPacket
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -21,31 +17,78 @@ class UsbAccessoryTransport(
     private val accessory: UsbAccessory
 ) : OrdTransport {
     private var fileDescriptor: ParcelFileDescriptor? = null
-    private var inputStream: DataInputStream? = null
-    private var outputStream: DataOutputStream? = null
+    private var inputStream: FileInputStream? = null
+    private var outputStream: FileOutputStream? = null
+
+    // 64KB user-space ring buffer so all read() syscalls are bulk (required by Android /dev/usb_accessory)
+    private val rxBuffer = ByteArray(64 * 1024)
+    private var rxHead = 0
+    private var rxTail = 0
 
     suspend fun open(): Boolean = withContext(Dispatchers.IO) {
         val pfd = usbManager.openAccessory(accessory) ?: return@withContext false
         fileDescriptor = pfd
         val fd = pfd.fileDescriptor
-        inputStream = DataInputStream(BufferedInputStream(FileInputStream(fd), 256 * 1024))
-        outputStream = DataOutputStream(BufferedOutputStream(FileOutputStream(fd), 64 * 1024))
+        inputStream = FileInputStream(fd)
+        outputStream = FileOutputStream(fd)
+        rxHead = 0
+        rxTail = 0
         true
+    }
+
+    private fun readNextByte(stream: FileInputStream): Int {
+        if (rxHead >= rxTail) {
+            rxHead = 0
+            val n = stream.read(rxBuffer, 0, rxBuffer.size)
+            if (n <= 0) return -1
+            rxTail = n
+        }
+        return rxBuffer[rxHead++].toInt() and 0xFF
+    }
+
+    private fun readExact(stream: FileInputStream, buffer: ByteArray, offset: Int = 0, length: Int = buffer.size) {
+        var copied = 0
+        while (copied < length) {
+            val available = rxTail - rxHead
+            if (available > 0) {
+                val toCopy = minOf(available, length - copied)
+                System.arraycopy(rxBuffer, rxHead, buffer, offset + copied, toCopy)
+                rxHead += toCopy
+                copied += toCopy
+            } else {
+                rxHead = 0
+                val n = stream.read(rxBuffer, 0, rxBuffer.size)
+                if (n <= 0) throw java.io.EOFException("USB stream reached EOF")
+                rxTail = n
+            }
+        }
     }
 
     override suspend fun readPacket(): OrdPacket = withContext(Dispatchers.IO) {
         val stream = inputStream ?: throw IllegalStateException("USB Accessory stream not open")
 
-        val headerBytes = ByteArray(OrdPacket.HEADER_SIZE)
-        stream.readFully(headerBytes)
-
-        val headerBuf = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN)
-        val magic = ByteArray(4)
-        headerBuf.get(magic)
-        if (!magic.contentEquals(OrdPacket.MAGIC)) {
-            throw IllegalArgumentException("Invalid magic header received over USB")
+        // Fast memory sliding-window sync to MAGIC (0x4F, 0x52, 0x44, 0x31 = "ORD1")
+        var m0 = 0
+        var m1 = 0
+        var m2 = 0
+        var m3 = 0
+        while (true) {
+            val b = readNextByte(stream)
+            if (b == -1) throw java.io.EOFException("USB stream closed")
+            m0 = m1
+            m1 = m2
+            m2 = m3
+            m3 = b
+            if (m0 == 0x4F && m1 == 0x52 && m2 == 0x44 && m3 == 0x31) {
+                break
+            }
         }
 
+        // Read remaining 12 bytes of header (version, msgType, flags, sequence, payloadLen)
+        val restHeader = ByteArray(12)
+        readExact(stream, restHeader)
+
+        val headerBuf = ByteBuffer.wrap(restHeader).order(ByteOrder.LITTLE_ENDIAN)
         val version = headerBuf.get()
         val msgType = headerBuf.get()
         val flags = headerBuf.short
@@ -58,7 +101,7 @@ class UsbAccessoryTransport(
 
         val payload = ByteArray(payloadLen)
         if (payloadLen > 0) {
-            stream.readFully(payload)
+            readExact(stream, payload)
         }
 
         val header = OrdHeader(version, msgType, flags, sequence, payloadLen)
@@ -93,5 +136,7 @@ class UsbAccessoryTransport(
         inputStream = null
         outputStream = null
         fileDescriptor = null
+        rxHead = 0
+        rxTail = 0
     }
 }

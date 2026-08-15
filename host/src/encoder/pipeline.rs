@@ -40,6 +40,7 @@ impl Default for EncoderConfig {
 pub struct VideoPipeline {
     pipeline: Pipeline,
     is_running: Arc<AtomicBool>,
+    error_notify: Arc<tokio::sync::Notify>,
 }
 
 impl VideoPipeline {
@@ -57,6 +58,32 @@ impl VideoPipeline {
             .context("Failed to parse and launch GStreamer pipeline")?
             .downcast::<Pipeline>()
             .map_err(|_| anyhow!("Launched element is not a Pipeline"))?;
+
+        let error_notify = Arc::new(tokio::sync::Notify::new());
+        let error_notify_clone = Arc::clone(&error_notify);
+
+        if let Some(bus) = pipeline.bus() {
+            tokio::spawn(async move {
+                use futures_util::StreamExt;
+                let mut bus_stream = bus.stream();
+                while let Some(msg) = bus_stream.next().await {
+                    use gstreamer::MessageView;
+                    match msg.view() {
+                        MessageView::Error(err) => {
+                            warn!("GStreamer Pipeline ERROR: {} ({:?})", err.error(), err.debug());
+                            error_notify_clone.notify_waiters();
+                            break;
+                        }
+                        MessageView::Eos(_) => {
+                            warn!("GStreamer Pipeline reached EOS");
+                            error_notify_clone.notify_waiters();
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
 
         let appsink = pipeline
             .by_name("ord_sink")
@@ -114,12 +141,18 @@ impl VideoPipeline {
         Ok(Self {
             pipeline,
             is_running,
+            error_notify,
         })
     }
 
+    pub fn error_notifier(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.error_notify)
+    }
+
     fn build_pipeline_string(pipewire_node_id: u32, config: &EncoderConfig) -> Result<String> {
+        let keepalive_ms = if config.fps > 0 { (1000 / config.fps).max(1) } else { 6 };
         let source_str = if pipewire_node_id > 0 {
-            format!("pipewiresrc path={} do-timestamp=true keepalive-time=11 always-copy=true", pipewire_node_id)
+            format!("pipewiresrc path={} do-timestamp=true keepalive-time={} always-copy=true", pipewire_node_id, keepalive_ms)
         } else {
             format!(
                 "videotestsrc is-live=true pattern=smpte ! video/x-raw,width={},height={},framerate={}/1",
@@ -138,23 +171,29 @@ impl VideoPipeline {
         };
 
         let encoder_str = if use_vaapi && ElementFactory::find("vah264enc").is_some() {
-            info!("Using VA-API Hardware H.264 Encoder (vah264enc) with zero-latency parameters");
-            format!("videoconvert ! vah264enc bitrate={} rate-control=cbr key-int-max=10", config.bitrate_kbps)
+            info!("Using VA-API Hardware H.264 Encoder (vah264enc) with 165 FPS low-latency parameters");
+            format!(
+                "videoconvert ! videoscale ! video/x-raw,width={},height={},format=NV12 ! vah264enc bitrate={} rate-control=cbr target-usage=1 b-frames=0 ref-frames=1 key-int-max=30 num-slices=1 aud=true",
+                config.width, config.height, config.bitrate_kbps
+            )
         } else if ElementFactory::find("x264enc").is_some() {
             info!("Using Software x264 Encoder (x264enc) with zerolatency tune");
             format!(
-                "videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast bitrate={} key-int-max=10 bframes=0 sliced-threads=true",
-                config.bitrate_kbps
+                "videoconvert ! videoscale ! video/x-raw,width={},height={} ! x264enc tune=zerolatency speed-preset=ultrafast bitrate={} key-int-max=30 bframes=0 sliced-threads=true aud=true",
+                config.width, config.height, config.bitrate_kbps
             )
         } else if ElementFactory::find("openh264enc").is_some() {
             info!("Using OpenH264 Encoder (openh264enc)");
-            format!("videoconvert ! openh264enc bitrate={} gop-size=10", config.bitrate_kbps * 1000)
+            format!(
+                "videoconvert ! videoscale ! video/x-raw,width={},height={} ! openh264enc bitrate={} gop-size=10",
+                config.width, config.height, config.bitrate_kbps * 1000
+            )
         } else {
             return Err(anyhow!("No compatible H.264 encoder found on system"));
         };
 
         let pipeline_str = format!(
-            "{} ! {} ! h264parse config-interval=-1 ! appsink name=ord_sink emit-signals=true max-buffers=1 drop=true sync=false",
+            "{} ! {} ! h264parse config-interval=-1 ! appsink name=ord_sink emit-signals=true max-buffers=2 drop=false sync=false",
             source_str, encoder_str
         );
 

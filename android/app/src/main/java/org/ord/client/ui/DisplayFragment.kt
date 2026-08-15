@@ -136,17 +136,20 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
     private fun startDisplaySession(surface: Surface) {
         sessionJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
             try {
+                android.util.Log.i("ORD", "startDisplaySession: isUsb=$isUsb, host=$hostIp:$hostPort")
                 val transport: OrdTransport = if (isUsb) {
                     withContext(Dispatchers.Main) {
                         binding.tvDisplayStatus.text = "Connecting via USB AOAP..."
                     }
                     val usbManager = requireContext().getSystemService(AppCompatActivity.USB_SERVICE) as UsbManager
                     val accessory = usbManager.accessoryList?.firstOrNull()
-                        ?: throw IllegalStateException("No USB Accessory attached")
+                        ?: throw IllegalStateException("No USB Accessory attached in accessoryList")
+                    android.util.Log.i("ORD", "Found accessory: ${accessory.description}, opening...")
                     val usbTransport = UsbAccessoryTransport(usbManager, accessory)
                     if (!usbTransport.open()) {
-                        throw IllegalStateException("Failed to open USB Accessory")
+                        throw IllegalStateException("Failed to open USB Accessory (pfd was null)")
                     }
+                    android.util.Log.i("ORD", "USB Accessory opened successfully")
                     usbTransport
                 } else {
                     withContext(Dispatchers.Main) {
@@ -154,6 +157,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                     }
                     val client = TcpClient(hostIp, hostPort)
                     client.connect(5000)
+                    android.util.Log.i("ORD", "TCP connected to $hostIp:$hostPort")
                     client
                 }
                 activeTransport = transport
@@ -169,10 +173,11 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                     screenWidth = screenW,
                     screenHeight = screenH,
                     densityDpi = displayMetrics.densityDpi,
-                    maxFps = 90,
+                    maxFps = 165,
                     supportedCodecs = listOf("h264")
                 )
 
+                android.util.Log.i("ORD", "Sending HELLO: ${hello.screenWidth}x${hello.screenHeight} @ ${hello.maxFps}fps")
                 transport.sendRaw(
                     msgType = OrdConstants.MSG_HELLO,
                     flags = 0,
@@ -180,17 +185,24 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                     payload = hello.toJson().toByteArray(Charsets.UTF_8)
                 )
 
-                // Await HELLO_ACK
-                val ackPacket = transport.readPacket()
-                if (ackPacket.header.msgType != OrdConstants.MSG_HELLO_ACK) {
-                    throw IllegalStateException("Expected HELLO_ACK, got ${ackPacket.header.msgType}")
+                // Await HELLO_ACK (discard any stale packets from previous session)
+                android.util.Log.i("ORD", "Waiting for HELLO_ACK...")
+                var ackPacket: OrdPacket
+                while (true) {
+                    ackPacket = transport.readPacket()
+                    android.util.Log.i("ORD", "Received packet type: 0x${ackPacket.header.msgType.toString(16)} (seq=${ackPacket.header.sequence}, len=${ackPacket.payload.size})")
+                    if (ackPacket.header.msgType == OrdConstants.MSG_HELLO_ACK) {
+                        break
+                    }
                 }
                 val helloAck = HelloAckMessage.fromJson(String(ackPacket.payload, Charsets.UTF_8))
+                android.util.Log.i("ORD", "Received HELLO_ACK: ${helloAck.width}x${helloAck.height} @ ${helloAck.fps}fps, codec=${helloAck.selectedCodec}")
 
                 // Initialize Decoder
                 val dec = H264Decoder(surface, helloAck.width, helloAck.height, frameBuffer)
                 decoder = dec
                 dec.start(viewLifecycleOwner.lifecycleScope)
+                android.util.Log.i("ORD", "H264Decoder started")
 
                 // Initialize Input
                 touchHandler = TouchInputHandler(transport, viewLifecycleOwner.lifecycleScope)
@@ -198,6 +210,7 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                     binding.surfaceView.setOnTouchListener(touchHandler)
                     binding.llConnectingState.visibility = View.GONE
                 }
+                android.util.Log.i("ORD", "Input handler attached, ready for video streaming loop")
 
                 // Packet Read Loop
                 while (isActive) {
@@ -227,12 +240,13 @@ class DisplayFragment : Fragment(), SurfaceHolder.Callback {
                             )
                         }
                         OrdConstants.MSG_DISCONNECT -> {
+                            android.util.Log.i("ORD", "Received MSG_DISCONNECT from host")
                             break
                         }
                     }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                android.util.Log.e("ORD", "Display session error: ${e.message}", e)
             } finally {
                 withContext(Dispatchers.Main) {
                     disconnectAndExit()

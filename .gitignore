@@ -21,3 +21,10 @@ android/.idea/
 .DS_Store
 *.swp
 *~
+
+# Native Drivers
+ord-display-driver
+ord-wayland-driver
+host/ord-display-driver
+host/ord-wayland-driver
+

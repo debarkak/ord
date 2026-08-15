@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::display::mutter::MutterDisplayBackend;
 use crate::display::test_source::TestSourceDisplayBackend;
+use crate::display::ticker::FrameTicker;
 use crate::display::{DisplayBackend, VirtualDisplayInfo};
 use crate::encoder::{EncoderConfig, VideoFrame, VideoPipeline};
 use crate::input::mutter_input::MutterInputBackend;
@@ -10,6 +11,7 @@ use crate::protocol::packet::{OrdHeader, OrdPacket, ORD_HEADER_SIZE};
 use crate::protocol::types::*;
 use crate::transport::tcp::FramedStream;
 use anyhow::{anyhow, Context, Result};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -50,7 +52,7 @@ impl SessionHandler {
         // Determine display parameters
         let width = if hello.screen_width > 0 { hello.screen_width } else { self.config.display.default_width };
         let height = if hello.screen_height > 0 { hello.screen_height } else { self.config.display.default_height };
-        let fps = if hello.max_fps > 0 { hello.max_fps.min(120) } else { self.config.display.default_fps };
+        let fps = if hello.max_fps > 0 { hello.max_fps } else { self.config.display.default_fps };
 
         // 2. Initialize Display Backend
         let mut display_backend: Box<dyn DisplayBackend> = if self.force_test_pattern {
@@ -115,7 +117,7 @@ impl SessionHandler {
         };
 
         // 6. Start Video Encoder Pipeline
-        let (frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(30);
+        let (frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(16);
         let encoder_config = EncoderConfig {
             width: display_info.width,
             height: display_info.height,
@@ -127,6 +129,7 @@ impl SessionHandler {
 
         let pipeline = VideoPipeline::new(display_info.pipewire_node_id, &encoder_config, frame_tx)?;
         pipeline.start()?;
+        let _ticker = FrameTicker::start();
 
         info!("Display and video streaming session established with {}", peer);
 
@@ -205,7 +208,7 @@ impl SessionHandler {
 
         let width = if hello.screen_width > 0 { hello.screen_width } else { self.config.display.default_width };
         let height = if hello.screen_height > 0 { hello.screen_height } else { self.config.display.default_height };
-        let fps = if hello.max_fps > 0 { hello.max_fps.min(120) } else { self.config.display.default_fps };
+        let fps = if hello.max_fps > 0 { hello.max_fps } else { self.config.display.default_fps };
 
         // 2. Initialize Display Backend
         let mut display_backend: Box<dyn DisplayBackend> = if self.force_test_pattern {
@@ -270,7 +273,7 @@ impl SessionHandler {
         };
 
         // 6. Start Video Encoder Pipeline
-        let (frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(120);
+        let (mut frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(16);
         let encoder_config = EncoderConfig {
             width: display_info.width,
             height: display_info.height,
@@ -280,25 +283,70 @@ impl SessionHandler {
             keyframe_interval_frames: self.config.stream.keyframe_interval_frames,
         };
 
-        let pipeline = VideoPipeline::new(display_info.pipewire_node_id, &encoder_config, frame_tx)?;
+        let mut display_info = display_info;
+        let mut pipeline = VideoPipeline::new(display_info.pipewire_node_id, &encoder_config, frame_tx)?;
         pipeline.start()?;
+        let mut error_notifier = pipeline.error_notifier();
+        let _ticker = FrameTicker::start();
 
         info!("Display and video streaming session established over USB AOAP");
 
         let mut frame_seq: u32 = 0;
         loop {
             tokio::select! {
-                Some(frame) = frame_rx.recv() => {
-                    frame_seq = frame_seq.wrapping_add(1);
-                    let mut flags = 0u16;
-                    if frame.is_keyframe {
-                        flags |= FLAG_KEYFRAME;
-                    }
-                    flags |= FLAG_END_OF_FRAME;
+                _ = error_notifier.notified() => {
+                    warn!("Display stream error from GStreamer. Auto-recovering virtual display & encoder pipeline...");
+                    Self::recover_display(
+                        &mut pipeline,
+                        &mut display_backend,
+                        &mut display_info,
+                        &mut frame_rx,
+                        &mut error_notifier,
+                        &encoder_config,
+                        width,
+                        height,
+                        fps,
+                    ).await;
+                }
+                recv_res = tokio::time::timeout(std::time::Duration::from_millis(500), frame_rx.recv()) => {
+                    match recv_res {
+                        Ok(Some(frame)) => {
+                            frame_seq = frame_seq.wrapping_add(1);
+                            let mut flags = 0u16;
+                            if frame.is_keyframe {
+                                flags |= FLAG_KEYFRAME;
+                            }
+                            flags |= FLAG_END_OF_FRAME;
 
-                    let packet = OrdPacket::new(MSG_VIDEO_DATA, flags, frame_seq, frame.data);
-                    if usb_out_tx.send(packet.encode()).await.is_err() {
-                        break;
+                            let packet = OrdPacket::new(MSG_VIDEO_DATA, flags, frame_seq, frame.data);
+                            // Use try_send: if USB write task is busy, drop the frame (keep real-time)
+                            // This prevents the session loop from blocking on USB backpressure
+                            match usb_out_tx.try_send(packet.encode()) {
+                                Ok(_) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    // USB is busy — frame is dropped. Decoder will interpolate.
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            // 500ms watchdog: no frames arrived from Mutter (e.g. GNOME Settings changed scaling/resolution)
+                            warn!("No video frames received for 500ms (GNOME display scaling or resolution changed). Auto-recovering virtual display...");
+                            Self::recover_display(
+                                &mut pipeline,
+                                &mut display_backend,
+                                &mut display_info,
+                                &mut frame_rx,
+                                &mut error_notifier,
+                                &encoder_config,
+                                width,
+                                height,
+                                fps,
+                            ).await;
+                        }
                     }
                 }
                 Some(packet) = usb_in_rx.recv() => {
@@ -314,6 +362,10 @@ impl SessionHandler {
                         }
                         MSG_DISCONNECT => {
                             info!("Client sent disconnect request");
+                            break;
+                        }
+                        MSG_HELLO => {
+                            info!("Client reconnected with new HELLO message — restarting session");
                             break;
                         }
                         _ => {}
@@ -413,6 +465,43 @@ impl SessionHandler {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    async fn recover_display(
+        pipeline: &mut VideoPipeline,
+        display_backend: &mut Box<dyn DisplayBackend>,
+        display_info: &mut VirtualDisplayInfo,
+        frame_rx: &mut mpsc::Receiver<VideoFrame>,
+        error_notifier: &mut Arc<tokio::sync::Notify>,
+        encoder_config: &EncoderConfig,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) {
+        let _ = pipeline.stop();
+        let _ = display_backend.destroy_virtual_display().await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        match display_backend.create_virtual_display(width, height, fps).await {
+            Ok(new_info) => {
+                *display_info = new_info;
+                let (new_tx, new_rx) = mpsc::channel::<VideoFrame>(16);
+                *frame_rx = new_rx;
+                match VideoPipeline::new(display_info.pipewire_node_id, encoder_config, new_tx) {
+                    Ok(new_pipeline) => {
+                        let _ = new_pipeline.start();
+                        *error_notifier = new_pipeline.error_notifier();
+                        *pipeline = new_pipeline;
+                        info!("Display stream successfully recovered! Streaming seamlessly at 165 FPS.");
+                    }
+                    Err(e) => {
+                        warn!("Could not recreate video pipeline after display reconfig: {:?}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Could not recreate virtual display after GNOME display reconfig: {:?}", e);
             }
         }
     }

@@ -88,7 +88,7 @@ class H264Decoder(
             codec = activeCodec
             isRunning.set(true)
 
-            // Worker Job: Continuous High-Speed Draining & Feeding
+            // Worker Job: Continuous Ultra-Fast Draining & Feeding
             workerJob = scope.launch(Dispatchers.Default) {
                 val bufferInfo = MediaCodec.BufferInfo()
 
@@ -96,16 +96,11 @@ class H264Decoder(
                 launch(Dispatchers.Default) {
                     while (isRunning.get() && isActive) {
                         try {
-                            var outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
-                            var drained = 0
-                            while (outIndex >= 0) {
+                            // Use 1000us (1ms) native blocking wait instead of CPU sleeping
+                            val outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 1_000)
+                            if (outIndex >= 0) {
                                 activeCodec.releaseOutputBuffer(outIndex, true)
                                 decodedFramesCount.incrementAndGet()
-                                drained++
-                                outIndex = activeCodec.dequeueOutputBuffer(bufferInfo, 0)
-                            }
-                            if (drained == 0) {
-                                delay(1)
                             }
                         } catch (e: Exception) {
                             if (!isRunning.get()) break
@@ -113,39 +108,31 @@ class H264Decoder(
                     }
                 }
 
-                // Input Feeding Loop (Instant queueing)
+                // Input Feeding Loop (Instantaneous queueing with 0ms wakeup)
                 while (isRunning.get() && isActive) {
-                    val frame = frameBuffer.poll()
+                    val frame = frameBuffer.poll(2)
                     if (frame != null) {
                         try {
-                            var queued = false
-                            for (attempt in 0..5) {
-                                val inIndex = activeCodec.dequeueInputBuffer(2_000) // 2ms timeout
-                                if (inIndex >= 0) {
-                                    val inputBuffer = activeCodec.getInputBuffer(inIndex)
-                                    if (inputBuffer != null) {
-                                        inputBuffer.clear()
-                                        inputBuffer.put(frame.data)
-                                        activeCodec.queueInputBuffer(
-                                            inIndex,
-                                            0,
-                                            frame.data.size,
-                                            frame.timestampUs,
-                                            0
-                                        )
-                                        queued = true
-                                        break
-                                    }
+                            val inIndex = activeCodec.dequeueInputBuffer(2_000) // 2ms native timeout
+                            if (inIndex >= 0) {
+                                val inputBuffer = activeCodec.getInputBuffer(inIndex)
+                                if (inputBuffer != null) {
+                                    inputBuffer.clear()
+                                    inputBuffer.put(frame.data)
+                                    activeCodec.queueInputBuffer(
+                                        inIndex,
+                                        0,
+                                        frame.data.size,
+                                        frame.timestampUs,
+                                        0
+                                    )
                                 }
-                            }
-                            if (!queued) {
+                            } else {
                                 droppedFramesCount.incrementAndGet()
                             }
                         } catch (e: Exception) {
                             if (!isRunning.get()) break
                         }
-                    } else {
-                        delay(1)
                     }
                 }
             }

@@ -34,16 +34,28 @@ class TcpClient(
     override suspend fun readPacket(): OrdPacket = withContext(Dispatchers.IO) {
         val stream = inputStream ?: throw IllegalStateException("Socket not connected")
 
-        val headerBytes = ByteArray(OrdPacket.HEADER_SIZE)
-        stream.readFully(headerBytes)
-
-        val headerBuf = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN)
-        val magic = ByteArray(4)
-        headerBuf.get(magic)
-        if (!magic.contentEquals(OrdPacket.MAGIC)) {
-            throw IllegalArgumentException("Invalid magic header received")
+        // Self-healing sliding-window sync to MAGIC (0x4F, 0x52, 0x44, 0x31)
+        var m0 = 0
+        var m1 = 0
+        var m2 = 0
+        var m3 = 0
+        while (true) {
+            val b = stream.read()
+            if (b == -1) throw java.io.EOFException("Socket stream closed")
+            m0 = m1
+            m1 = m2
+            m2 = m3
+            m3 = b
+            if (m0 == 0x4F && m1 == 0x52 && m2 == 0x44 && m3 == 0x31) {
+                break
+            }
         }
 
+        // Read remaining 12 bytes of header
+        val restHeader = ByteArray(12)
+        stream.readFully(restHeader)
+
+        val headerBuf = ByteBuffer.wrap(restHeader).order(ByteOrder.LITTLE_ENDIAN)
         val version = headerBuf.get()
         val msgType = headerBuf.get()
         val flags = headerBuf.short

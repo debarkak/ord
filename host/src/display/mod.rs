@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 pub mod mutter;
 pub mod test_source;
+pub mod ticker;
 
 #[derive(Debug, Clone)]
 pub struct VirtualDisplayInfo {

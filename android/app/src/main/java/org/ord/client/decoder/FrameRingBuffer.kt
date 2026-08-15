@@ -1,8 +1,8 @@
 package org.ord.client.decoder
 
 import org.ord.client.protocol.OrdConstants
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 data class EncodedVideoFrame(
     val sequence: Int,
@@ -15,45 +15,43 @@ data class EncodedVideoFrame(
 }
 
 class FrameRingBuffer(
-    private val maxCapacity: Int = 3
+    private val maxCapacity: Int = 16
 ) {
-    private val queue = ConcurrentLinkedQueue<EncodedVideoFrame>()
-    private val count = AtomicInteger(0)
-    private var isDropping = false
+    private val queue = LinkedBlockingQueue<EncodedVideoFrame>(maxCapacity)
+    @Volatile
+    private var isDroppingUntilKeyframe = false
 
     fun offer(frame: EncodedVideoFrame): Boolean {
-        // If queue exceeds capacity and a keyframe arrives, reset to keyframe
-        if (frame.isKeyframe && count.get() > 3) {
-            queue.clear()
-            count.set(0)
-            isDropping = false
+        if (frame.isKeyframe) {
+            // Keyframe arrived: safe to resume decoding with zero glitching/tearing
+            isDroppingUntilKeyframe = false
+        } else if (isDroppingUntilKeyframe) {
+            // Drop P-frames until next IDR keyframe to prevent reference-frame tearing
+            return false
         }
 
-        if (count.get() >= maxCapacity) {
-            if (!frame.isKeyframe) {
+        if (queue.remainingCapacity() == 0) {
+            if (frame.isKeyframe) {
+                // If queue full but keyframe arrived, clear queue and accept keyframe
+                queue.clear()
+            } else {
+                // Cannot enqueue P-frame: enter drop-until-keyframe state to avoid macroblock tearing
+                isDroppingUntilKeyframe = true
                 return false
             }
         }
-
-        queue.offer(frame)
-        count.incrementAndGet()
-        return true
+        return queue.offer(frame)
     }
 
-    fun poll(): EncodedVideoFrame? {
-        val frame = queue.poll()
-        if (frame != null) {
-            count.decrementAndGet()
-        }
-        return frame
+    fun poll(timeoutMs: Long = 2): EncodedVideoFrame? {
+        return queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
     }
 
     fun clear() {
         queue.clear()
-        count.set(0)
-        isDropping = false
+        isDroppingUntilKeyframe = false
     }
 
     val size: Int
-        get() = count.get()
+        get() = queue.size
 }

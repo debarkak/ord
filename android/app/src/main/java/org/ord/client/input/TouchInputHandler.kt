@@ -4,6 +4,7 @@ import android.view.MotionEvent
 import android.view.View
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import org.ord.client.protocol.InputEvent
 import org.ord.client.protocol.InputEventType
@@ -12,8 +13,27 @@ import org.ord.client.transport.OrdTransport
 
 class TouchInputHandler(
     private val transport: OrdTransport,
-    private val scope: CoroutineScope
+    scope: CoroutineScope
 ) : View.OnTouchListener {
+
+    // High-performance bounded channel to eliminate GC allocations and thread pool churn
+    private val inputChannel = Channel<InputEvent>(Channel.UNLIMITED)
+
+    init {
+        // Dedicated single worker so all input packets are sent strictly in order with zero locks
+        scope.launch(Dispatchers.IO) {
+            for (event in inputChannel) {
+                try {
+                    transport.sendRaw(
+                        msgType = OrdConstants.MSG_INPUT_EVENT,
+                        flags = 0,
+                        sequence = 0,
+                        payload = event.encode()
+                    )
+                } catch (_: Exception) {}
+            }
+        }
+    }
 
     override fun onTouch(v: View, event: MotionEvent): Boolean {
         val width = v.width.toFloat().coerceAtLeast(1f)
@@ -28,7 +48,7 @@ class TouchInputHandler(
                 val normX = ((event.getX(pointerIndex) / width) * 65535).toInt().coerceIn(0, 65535)
                 val normY = ((event.getY(pointerIndex) / height) * 65535).toInt().coerceIn(0, 65535)
 
-                sendInput(
+                inputChannel.trySend(
                     InputEvent(
                         eventType = InputEventType.TouchDown,
                         slot = pointerId.toByte(),
@@ -46,7 +66,7 @@ class TouchInputHandler(
                     val normX = ((event.getX(i) / width) * 65535).toInt().coerceIn(0, 65535)
                     val normY = ((event.getY(i) / height) * 65535).toInt().coerceIn(0, 65535)
 
-                    sendInput(
+                    inputChannel.trySend(
                         InputEvent(
                             eventType = InputEventType.TouchMove,
                             slot = pointerId.toByte(),
@@ -63,7 +83,7 @@ class TouchInputHandler(
                 val normX = ((event.getX(pointerIndex) / width) * 65535).toInt().coerceIn(0, 65535)
                 val normY = ((event.getY(pointerIndex) / height) * 65535).toInt().coerceIn(0, 65535)
 
-                sendInput(
+                inputChannel.trySend(
                     InputEvent(
                         eventType = InputEventType.TouchUp,
                         slot = pointerId.toByte(),
@@ -75,7 +95,7 @@ class TouchInputHandler(
             }
 
             MotionEvent.ACTION_CANCEL -> {
-                sendInput(
+                inputChannel.trySend(
                     InputEvent(
                         eventType = InputEventType.TouchCancel,
                         slot = 0,
@@ -88,20 +108,5 @@ class TouchInputHandler(
         }
 
         return true
-    }
-
-    private fun sendInput(event: InputEvent) {
-        scope.launch(Dispatchers.IO) {
-            try {
-                transport.sendRaw(
-                    msgType = OrdConstants.MSG_INPUT_EVENT,
-                    flags = 0,
-                    sequence = 0,
-                    payload = event.encode()
-                )
-            } catch (e: Exception) {
-                // Ignore transient send failures on disconnect
-            }
-        }
     }
 }
